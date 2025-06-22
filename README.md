@@ -22,6 +22,9 @@ This project is available on [GitHub](https://github.com/tommyvange/ArrStalledHa
         -   Remove the stalled download.
         -   Blocklist the stalled download.
         -   Blocklist and re-trigger a search for the movie or episodes.
+-   **Selective Ignore via qBittorrent Tags**:
+    -   Dynamically ignore specific downloads by applying tags in qBittorrent.
+    -   Tagged downloads will remain stalled without any action taken.
 -   **Database Tracking**:
     -   Tracks stalled downloads in a SQLite database to ensure actions are only taken after a specified timeout period.
 -   **Logging**:
@@ -48,6 +51,10 @@ The script is fully configurable using environment variables specified in a `.en
 | `LIDARR_API_KEY`                        | The API key for Lidarr (found in Radarr settings).                                              | None (required)        |
 | `READARR_URL`                           | The base URL for Readarr's API. Example: `http://localhost:8787,http://otherhost:8787`.         | None (required)        |
 | `READARR_API_KEY`                       | The API key for Readarr (found in Sonarr settings).                                             | None (required)        |
+| `QBITTORRENT_URL`                       | The base URL for qBittorrent Web UI. Example: `http://localhost:8080`.                          | None (optional)        |
+| `QBITTORRENT_USERNAME`                  | Username for qBittorrent Web UI authentication.                                                 | None (optional)        |
+| `QBITTORRENT_PASSWORD`                  | Password for qBittorrent Web UI authentication.                                                 | None (optional)        |
+| `IGNORE_TORRENT_TAGS`                   | Comma-separated list of qBittorrent tags. Torrents with these tags will be ignored.             | None (optional)        |
 | `STALLED_TIMEOUT`                       | Time (in seconds) a download must remain stalled before actions are taken.                      | `3600` (1 hour)        |
 | `STALLED_ACTION`                        | Action to perform on stalled downloads: `REMOVE`, `BLOCKLIST`, or `BLOCKLIST_AND_SEARCH`.       | `BLOCKLIST_AND_SEARCH` |
 | `VERBOSE`                               | Enable verbose logging for debugging (`true` or `false`).                                       | `false`                |
@@ -70,21 +77,64 @@ To disable Radarr or Sonarr; leave the URL empty in the environment. If the serv
     
     -   The script identifies stalled downloads based on the error message: `"The download is stalled with no connections"`.
     -   [Optional] The script treats downloads with the error message `"qBittorrent is downloading metadata"` as stalled.
-3.  **Timeout Check**:
+3.  **Check for Ignored Downloads**:
+    
+    -   If qBittorrent integration is configured, the script checks each stalled download's torrent tags.
+    -   Downloads with tags matching those in `IGNORE_TORRENT_TAGS` are skipped.
+4.  **Timeout Check**:
     
     -   Downloads are only handled if they have been stalled longer than the configured `STALLED_TIMEOUT`.
-4.  **Perform Configured Action**:
+5.  **Perform Configured Action**:
     
     -   Based on the `STALLED_ACTION` setting:
         -   **REMOVE**: Removes the stalled download.
         -   **BLOCKLIST**: Removes and blocklists the stalled download.
         -   **BLOCKLIST_AND_SEARCH**: Removes, blocklists, and re-triggers a search for the movie or episodes.
-5.  **Logging**:
+6.  **Logging**:
     
     -   Logs detailed information about each action for visibility.
-6.  **Repeat**:
+7.  **Repeat**:
     
     -   When running in Docker, the script waits for the `RUN_INTERVAL` duration and repeats the process.
+
+----------
+
+## Using qBittorrent Tag Integration
+
+The qBittorrent tag integration allows you to selectively ignore certain stalled downloads by applying tags in qBittorrent. This is useful for:
+- Long-running downloads that you know will take time
+- Downloads from slow trackers that you want to keep
+- Special cases where you want manual control
+
+### Setup
+
+1. **Enable qBittorrent Web UI**:
+   - In qBittorrent, go to Tools → Options → Web UI
+   - Check "Web User Interface (Remote control)"
+   - Note the port number (default: 8080)
+   - Set authentication credentials
+
+2. **Configure Environment Variables**:
+   ```env
+   # Add these to your existing .env file
+   QBITTORRENT_URL=http://localhost:8080
+   QBITTORRENT_USERNAME=admin
+   QBITTORRENT_PASSWORD=adminpass
+   IGNORE_TORRENT_TAGS=slow,manual,keep
+   ```
+
+3. **Apply Tags in qBittorrent**:
+   - Right-click on any torrent in qBittorrent
+   - Select "Tags" → "Add tag"
+   - Enter a tag name that matches one in your `IGNORE_TORRENT_TAGS` list
+   - The script will now ignore this download even if it's stalled
+
+### Important Notes
+
+- Tags can be added or removed at any time - changes take effect on the next script run
+- The integration only works with qBittorrent as the download client
+- If qBittorrent is unreachable, the script continues normally without the ignore feature
+- Multiple tags can be used for different purposes (e.g., "slow" for known slow trackers, "manual" for downloads you'll handle yourself)
 
 ----------
 
@@ -125,6 +175,11 @@ services:
       VERBOSE: "false"
       RUN_INTERVAL: "300"
       COUNT_DOWNLOADING_METADATA_AS_STALLED: "false"
+      # Optional qBittorrent integration
+      QBITTORRENT_URL: "http://localhost:8080"
+      QBITTORRENT_USERNAME: "admin"
+      QBITTORRENT_PASSWORD: "adminpass"
+      IGNORE_TORRENT_TAGS: "slow,manual,keep"
 ```
 
 **Docker CLI**
@@ -148,13 +203,17 @@ docker run -d \
   -e VERBOSE=false \
   -e RUN_INTERVAL=300 \
   -e COUNT_DOWNLOADING_METADATA_AS_STALLED=false \
+  -e QBITTORRENT_URL=http://localhost:8080 \
+  -e QBITTORRENT_USERNAME=admin \
+  -e QBITTORRENT_PASSWORD=adminpass \
+  -e IGNORE_TORRENT_TAGS=slow,manual,keep \
   --restart unless-stopped \
   tommythebeast/arrstalledhandler:latest
 ```
 
 *One line:*
 ``` bash
-docker run -d --name=ArrStalledHandler -e RADARR_URL=http://localhost:7878,http://otherhost:7878 -e RADARR_API_KEY=your_radarr_api_key,your_2nd_radarr_api_key -e SONARR_URL=http://localhost:8989,http://otherhost:8989 -e SONARR_API_KEY=your_sonarr_api_key,your_2nd_sonarr_api_key -e LIDARR_URL=http://localhost:8686,http://otherhost:8686  -e LIDARR_API_KEY=your_lidarr_api_key,your_2nd_lidarr_api_key -e READARR_URL=http://localhost:8787,http://otherhost:8787 -e READARR_API_KEY=your_readarr_api_key,our_2nd_readarr_api_key -e STALLED_TIMEOUT=3600 -e STALLED_ACTION=BLOCKLIST_AND_SEARCH -e VERBOSE=false -e RUN_INTERVAL=300 -e COUNT_DOWNLOADING_METADATA_AS_STALLED=false --restart unless-stopped tommythebeast/arrstalledhandler:latest
+docker run -d --name=ArrStalledHandler -e RADARR_URL=http://localhost:7878,http://otherhost:7878 -e RADARR_API_KEY=your_radarr_api_key,your_2nd_radarr_api_key -e SONARR_URL=http://localhost:8989,http://otherhost:8989 -e SONARR_API_KEY=your_sonarr_api_key,your_2nd_sonarr_api_key -e LIDARR_URL=http://localhost:8686,http://otherhost:8686  -e LIDARR_API_KEY=your_lidarr_api_key,your_2nd_lidarr_api_key -e READARR_URL=http://localhost:8787,http://otherhost:8787 -e READARR_API_KEY=your_readarr_api_key,our_2nd_readarr_api_key -e QBITTORRENT_URL=http://localhost:8080 -e QBITTORRENT_USERNAME=admin -e QBITTORRENT_PASSWORD=adminpass -e IGNORE_TORRENT_TAGS=slow,manual,keep -e STALLED_TIMEOUT=3600 -e STALLED_ACTION=BLOCKLIST_AND_SEARCH -e VERBOSE=false -e RUN_INTERVAL=300 -e COUNT_DOWNLOADING_METADATA_AS_STALLED=false --restart unless-stopped tommythebeast/arrstalledhandler:latest
 ```
 
 ### Docker Deployment (Manual)
@@ -184,6 +243,11 @@ docker run -d --name=ArrStalledHandler -e RADARR_URL=http://localhost:7878,http:
     VERBOSE=false
     RUN_INTERVAL=300
     COUNT_DOWNLOADING_METADATA_AS_STALLED=false
+    # Optional qBittorrent integration
+    QBITTORRENT_URL=http://localhost:8080
+    QBITTORRENT_USERNAME=admin
+    QBITTORRENT_PASSWORD=adminpass
+    IGNORE_TORRENT_TAGS=slow,manual,keep
     ```
 
 3.  **Build the Docker Image**:
@@ -232,6 +296,11 @@ docker run -d --name=ArrStalledHandler -e RADARR_URL=http://localhost:7878,http:
     VERBOSE=false
     RUN_INTERVAL=300
     COUNT_DOWNLOADING_METADATA_AS_STALLED=false
+    # Optional qBittorrent integration
+    QBITTORRENT_URL=http://localhost:8080
+    QBITTORRENT_USERNAME=admin
+    QBITTORRENT_PASSWORD=adminpass
+    IGNORE_TORRENT_TAGS=slow,manual,keep
     ```
         
 4.  **Run the Script**:
@@ -251,6 +320,7 @@ Example log output:
     
 ``` text
 INFO: Checking stalled downloads in Radarr...
+INFO: Ignoring download 'Movie.Name.2024.1080p.WEB-DL' due to torrent tag: slow
 INFO: Handling Download ID 1462067687 in Radarr (elapsed time: 400 seconds).
 INFO: Triggering search for Movie ID 770 in Radarr using Command API...
 INFO: Script execution completed. Sleeping for 300 seconds...
@@ -264,6 +334,17 @@ INFO: Script execution completed. Sleeping for 300 seconds...
 1. **Script Not Executing Actions**:
     -   Check if `STALLED_TIMEOUT` is too high.
     -   Verify the stalled downloads are correctly detected via Radarr/Sonarr queues.
+
+2. **qBittorrent Integration Issues**:
+    -   Verify qBittorrent Web UI is enabled and accessible
+    -   Check username/password are correct
+    -   Ensure the URL includes the correct protocol and port (e.g., `http://localhost:8080`)
+    -   Check logs for connection errors
+
+3. **Downloads Not Being Ignored**:
+    -   Verify the torrent has the correct tag in qBittorrent
+    -   Check that the tag exactly matches one in `IGNORE_TORRENT_TAGS` (case-sensitive)
+    -   Ensure the download client in *arr is set to qBittorrent
 
 ----------
 

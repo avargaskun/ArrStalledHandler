@@ -30,6 +30,14 @@ if os.getenv("READARR_URL") is not None:
     READARR_API_KEY = os.getenv("READARR_API_KEY").split(",")
 else:
     READARR_URL = None
+
+# qBittorrent configuration
+QBITTORRENT_URL = os.getenv("QBITTORRENT_URL")
+QBITTORRENT_USERNAME = os.getenv("QBITTORRENT_USERNAME")
+QBITTORRENT_PASSWORD = os.getenv("QBITTORRENT_PASSWORD")
+IGNORE_TORRENT_TAGS = os.getenv("IGNORE_TORRENT_TAGS", "").split(",") if os.getenv("IGNORE_TORRENT_TAGS") else []
+IGNORE_TORRENT_TAGS = [tag.strip() for tag in IGNORE_TORRENT_TAGS if tag.strip()]  # Clean up tags
+
 STALLED_TIMEOUT = int(os.getenv("STALLED_TIMEOUT", 3600))
 STALLED_ACTION = os.getenv("STALLED_ACTION", "BLOCKLIST_AND_SEARCH").upper()
 VERBOSE = os.getenv("VERBOSE", "false").lower() == "true"
@@ -44,6 +52,10 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler()]
 )
+
+# qBittorrent session management
+qbit_session = None
+qbit_cookies = None
 
 def initialize_database():
     """Initialize the SQLite database for tracking stalled downloads."""
@@ -133,6 +145,117 @@ def delete_api(url, headers, params=None):
     except requests.RequestException as e:
         logging.error(f"API DELETE Error: {e}")
 
+def qbittorrent_login():
+    """Login to qBittorrent and store session cookies."""
+    global qbit_session, qbit_cookies
+    
+    if not QBITTORRENT_URL:
+        return False
+    
+    try:
+        qbit_session = requests.Session()
+        login_url = f"{QBITTORRENT_URL}/api/v2/auth/login"
+        login_data = {
+            'username': QBITTORRENT_USERNAME,
+            'password': QBITTORRENT_PASSWORD
+        }
+        
+        response = qbit_session.post(login_url, data=login_data)
+        response.raise_for_status()
+        
+        if response.text.strip().lower() == 'ok.':
+            qbit_cookies = qbit_session.cookies
+            logging.info("Successfully logged into qBittorrent")
+            return True
+        else:
+            logging.error(f"qBittorrent login failed: {response.text}")
+            return False
+            
+    except requests.RequestException as e:
+        logging.error(f"qBittorrent login error: {e}")
+        return False
+
+def get_torrent_info_by_hash(info_hash):
+    """Get torrent information from qBittorrent by info hash."""
+    global qbit_session, qbit_cookies
+    
+    if not QBITTORRENT_URL or not info_hash:
+        return None
+    
+    # Ensure we're logged in
+    if not qbit_session or not qbit_cookies:
+        if not qbittorrent_login():
+            return None
+    
+    try:
+        # Get torrent properties
+        props_url = f"{QBITTORRENT_URL}/api/v2/torrents/properties"
+        response = qbit_session.get(props_url, params={'hash': info_hash.lower()}, cookies=qbit_cookies)
+        
+        # If we get a 403, try to re-login
+        if response.status_code == 403:
+            logging.info("qBittorrent session expired, re-logging in...")
+            if qbittorrent_login():
+                response = qbit_session.get(props_url, params={'hash': info_hash.lower()}, cookies=qbit_cookies)
+            else:
+                return None
+        
+        if not response.ok:
+            logging.debug(f"qBittorrent request failed with {response.status_code}")
+            return False
+
+        torrent_info = response.json()
+        
+        # Get torrent tags separately
+        info_url = f"{QBITTORRENT_URL}/api/v2/torrents/info"
+        response = qbit_session.get(info_url, params={'hashes': info_hash.lower()}, cookies=qbit_cookies)
+        response.raise_for_status()
+        
+        info_data = response.json()
+        if info_data and len(info_data) > 0:
+            torrent_info['tags'] = info_data[0].get('tags', '').split(', ') if info_data[0].get('tags') else []
+        else:
+            torrent_info['tags'] = []
+        
+        return torrent_info
+        
+    except requests.RequestException as e:
+        logging.error(f"Error getting torrent info from qBittorrent: {e}")
+        return None
+
+def should_ignore_download(item):
+    """Check if a download should be ignored based on torrent tags."""
+    if not QBITTORRENT_URL or not IGNORE_TORRENT_TAGS:
+        return False
+    
+    # Get the download client info
+    download_client = item.get('downloadClient', '').lower()
+    if 'qbittorrent' not in download_client:
+        logging.debug(f"Download client '{download_client}' is not qBittorrent, not checking tags")
+        return False
+    
+    # Get the info hash from the download
+    download_id = item.get('downloadId')
+    if not download_id:
+        logging.debug("No downloadId found in queue item")
+        return False
+    
+    # The downloadId from *arr apps is typically the torrent hash
+    torrent_info = get_torrent_info_by_hash(download_id)
+    if not torrent_info:
+        logging.warning(f"Could not get torrent info for hash: {download_id}")
+        return False
+    
+    # Check if any of the torrent's tags match our ignore list
+    torrent_tags = torrent_info.get('tags', [])
+    if torrent_tags:
+        for tag in torrent_tags:
+            if tag in IGNORE_TORRENT_TAGS:
+                logging.info(f"Ignoring download '{item.get('title')}' due to torrent tag: {tag}")
+                return True
+    
+    return False
+
 def detect_stuck_metadata_downloads(base_url, api_key, service_name, api_version):
     """
     Detect downloads stuck at 'Downloading Metadata' and apply timeout logic.
@@ -164,6 +287,10 @@ def detect_stuck_metadata_downloads(base_url, api_key, service_name, api_version
 
     for item in metadata_records:
         if item.get("errorMessage", "").lower() == "qbittorrent is downloading metadata":
+            # Check if this download should be ignored
+            if should_ignore_download(item):
+                continue
+                
             download_id = str(item["id"])
             movie_id = item.get("movieId") if service_name == "Radarr" else None
             episode_ids = [item["episodeId"]] if service_name == "Sonarr" and "episodeId" in item else None
@@ -225,9 +352,6 @@ def query_api_paginated(base_url, headers, params=None, page_size=50):
 
         # Move to the next page
         page += 1
-
-    return all_records
-
 
     return all_records
 
@@ -299,6 +423,10 @@ def handle_stalled_downloads(base_url, api_key, service_name, api_version):
     stalled_downloads = get_stalled_downloads_from_db(service_name)
     for item in queue_records:
         if item.get("errorMessage", "").lower() == "the download is stalled with no connections":
+            # Check if this download should be ignored
+            if should_ignore_download(item):
+                continue
+
             download_id = str(item["id"])
             movie_id = item.get("movieId") if service_name == "Radarr" else None
             episode_ids = [item["episodeId"]] if service_name == "Sonarr" and "episodeId" in item else None
