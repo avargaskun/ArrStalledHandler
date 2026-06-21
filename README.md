@@ -31,6 +31,8 @@ This project is available on [GitHub](https://github.com/tommyvange/ArrStalledHa
     -   Verbose and informative logging controlled via configuration.
 -   **Docker Support**:
     -   Easily deployable with Docker and customizable run intervals.
+-   **Health Check Endpoint**:
+    -   Exposes an HTTP `GET /ping` endpoint on port `9898` for container health checks.
 
 ----------
 
@@ -134,7 +136,34 @@ The qBittorrent tag integration allows you to selectively ignore certain stalled
 - Tags can be added or removed at any time - changes take effect on the next script run
 - The integration only works with qBittorrent as the download client
 - If qBittorrent is unreachable, the script continues normally without the ignore feature
+- qBittorrent's "Bypass authentication for clients on localhost" / "...in whitelisted IP subnets" is supported: when the Web UI bypasses authentication it answers the login request with `HTTP 204` and an empty body instead of `Ok.`, which the script accepts as a successful login
 - Multiple tags can be used for different purposes (e.g., "slow" for known slow trackers, "manual" for downloads you'll handle yourself)
+
+----------
+
+## Health Check
+
+When running in Docker, the script starts a lightweight HTTP server on port `9898` that responds to `GET /ping` with `200 OK`. This gives container orchestrators a way to verify the handler is alive, since it otherwise has no listening socket. Any other path returns `404`, and health-check requests are not logged.
+
+**Docker Compose**
+
+```yaml
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:9898/ping')\" || exit 1"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+```
+
+**Docker CLI**
+
+```bash
+  --health-cmd="python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:9898/ping')\" || exit 1" \
+  --health-interval=1m \
+  --health-timeout=10s \
+  --health-retries=3 \
+```
 
 ----------
 
