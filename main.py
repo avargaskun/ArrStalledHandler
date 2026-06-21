@@ -165,7 +165,7 @@ def qbittorrent_login():
         response = qbit_session.post(login_url, data=login_data)
         response.raise_for_status()
         
-        if response.text.strip().lower() == 'ok.':
+        if response.text.strip().lower() in ('ok.', ''):  # '' = WebUI auth bypass (whitelisted subnet) returns 204
             qbit_cookies = qbit_session.cookies
             logging.info("Successfully logged into qBittorrent")
             return True
