@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 import time
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # Load environment variables
 load_dotenv()
@@ -446,7 +448,34 @@ def handle_stalled_downloads(base_url, api_key, service_name, api_version):
                 add_stalled_download_to_db(download_id, datetime.now(timezone.utc), service_name)
                 logging.info(f"Adding stalled download ID {download_id} in {service_name} to the database.")
 
+# --- Health Check Server Logic ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/ping':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+    
+    # Silence console logs for health checks to keep logs clean
+    def log_message(self, format, *args):
+        return
+
+def start_health_server():
+    try:
+        server = HTTPServer(('0.0.0.0', 9898), HealthCheckHandler)
+        logging.info("Health check server listening on port 9898")
+        server.serve_forever()
+    except Exception as e:
+        logging.error(f"Failed to start health check server: {e}")
+# ---------------------------------
+
 if __name__ == "__main__":
+    # Start the health check server in a background thread
+    health_thread = threading.Thread(target=start_health_server, daemon=True)
+    health_thread.start()
     try:
         while True:
             initialize_database()
