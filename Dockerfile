@@ -16,5 +16,8 @@ RUN chmod +x main.py
 # Disable output buffering in Python
 ENV PYTHONUNBUFFERED=1
 
+# Health check endpoint (/ping)
+EXPOSE 9898
+
 # Specify the entrypoint
 ENTRYPOINT ["python", "main.py"]
