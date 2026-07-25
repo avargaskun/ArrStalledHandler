@@ -377,6 +377,38 @@ INFO: Script execution completed. Sleeping for 300 seconds...
 
 ----------
 
+## Releases
+
+Versioning is automated with [release-please](https://github.com/googleapis/release-please):
+the version bump is derived from [Conventional Commits](https://www.conventionalcommits.org/)
+on `main`. This repo is **squash-merge only** and the **PR title becomes the commit
+subject**, so the PR title is what drives the release:
+
+| PR title prefix | Release bump |
+|---|---|
+| `fix: …` | Patch (x.y.**Z**) |
+| `feat: …` | Minor (x.**Y**.0) |
+| `feat!: …` or a `BREAKING CHANGE:` footer | Major (**X**.0.0) |
+| `docs:`, `chore:`, `ci:`, `refactor:`, `test:` | No release |
+
+A PR title that doesn't follow the convention merges fine but is **silently excluded** from
+release notes and triggers no version bump — title PRs conventionally even for small changes.
+
+The flow after merging a `fix:`/`feat:` PR:
+
+1. The [Release workflow](.github/workflows/release-please.yml) opens (or updates) a
+   `chore(main): release X.Y.Z` PR containing the `CHANGELOG.md` update.
+2. Merging that release PR creates the `vX.Y.Z` tag + GitHub Release, and the chained
+   `publish` job builds and pushes the container image to
+   [GHCR](https://github.com/avargaskun/ArrStalledHandler/pkgs/container/arrstalledhandler)
+   with tags `X.Y.Z`, `X.Y`, `X` and `latest`.
+
+To re-publish an existing release's image (e.g. after a transient registry failure), run the
+Release workflow manually via **Actions → Release → Run workflow** and enter the tag
+(`vX.Y.Z`) in the `tag` input.
+
+----------
+
 ## Credits
 
 ### Author
