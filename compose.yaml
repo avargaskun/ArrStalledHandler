@@ -1,6 +1,6 @@
 services:
   arr-stalled-handler:
-    build: .
+    image: ghcr.io/avargaskun/arrstalledhandler:latest
     container_name: ArrStalledHandler
     restart: unless-stopped
     environment:
@@ -12,6 +12,10 @@ services:
       LIDARR_API_KEY: "${LIDARR_API_KEY}" # Lidarr API Key
       READARR_URL: "${READARR_URL}" # Readarr URL
       READARR_API_KEY: "${READARR_API_KEY}" # Readarr API Key
+      QBITTORRENT_URL: "${QBITTORRENT_URL}" # qBittorrent WebUI URL (leave empty to disable qBittorrent integration)
+      QBITTORRENT_USERNAME: "${QBITTORRENT_USERNAME}" # qBittorrent WebUI username
+      QBITTORRENT_PASSWORD: "${QBITTORRENT_PASSWORD}" # qBittorrent WebUI password
+      IGNORE_TORRENT_TAGS: "${IGNORE_TORRENT_TAGS}" # Comma-separated qBittorrent tags whose torrents are never handled
       STALLED_TIMEOUT: "${STALLED_TIMEOUT}" # How long a download should be stalled before handling it (in seconds)
       STALLED_ACTION: "${STALLED_ACTION}" # Options: REMOVE or BLOCKLIST or BLOCKLIST_AND_SEARCH
       VERBOSE: "${VERBOSE}" # Enable verbose/debug logging

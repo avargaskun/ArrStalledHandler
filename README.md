@@ -6,10 +6,10 @@ This repository is licensed under the **[GNU General Public License v3.0 (GPLv3)
 
 Created by **[Tommy Vange Rød](https://github.com/tommyvange)**. You can see the full list of credits [here](#credits).
 
-This project is available on [GitHub](https://github.com/tommyvange/ArrStalledHandler), [Docker Hub](https://hub.docker.com/r/tommythebeast/arrstalledhandler) and the [Unraid Community App store](#unraid-deployment). 
+This project is available on [GitHub](https://github.com/avargaskun/ArrStalledHandler), [GHCR](https://github.com/avargaskun/ArrStalledHandler/pkgs/container/arrstalledhandler) and the [Unraid Community App store](#unraid-deployment). 
 
-[![Publish Docker image](https://github.com/tommyvange/ArrStalledHandler/actions/workflows/publish-docker-image.yml/badge.svg)](https://github.com/tommyvange/ArrStalledHandler/actions/workflows/publish-docker-image.yml)
-[![Check docker build](https://github.com/tommyvange/ArrStalledHandler/actions/workflows/check-docker-image.yml/badge.svg?branch=main)](https://github.com/tommyvange/ArrStalledHandler/actions/workflows/check-docker-image.yml)
+[![Release](https://github.com/avargaskun/ArrStalledHandler/actions/workflows/release-please.yml/badge.svg)](https://github.com/avargaskun/ArrStalledHandler/actions/workflows/release-please.yml)
+[![CI](https://github.com/avargaskun/ArrStalledHandler/actions/workflows/ci.yml/badge.svg)](https://github.com/avargaskun/ArrStalledHandler/actions/workflows/ci.yml)
 
 ----------
 
@@ -179,7 +179,7 @@ When running in Docker, the script starts a lightweight HTTP server on port `989
 
 Now the container should automatically start up and start handling your stalled downloads.
 
-### Docker Deployment ([Docker Hub](https://hub.docker.com/r/tommythebeast/arrstalledhandler))
+### Docker Deployment ([GHCR](https://github.com/avargaskun/ArrStalledHandler/pkgs/container/arrstalledhandler))
 
 **Docker compose**
 
@@ -187,7 +187,7 @@ More info at [Docker Docs](https://docs.docker.com/compose/intro/compose-applica
 ``` yaml
 services:
   arr-stalled-handler:
-    image: tommythebeast/arrstalledhandler:latest
+    image: ghcr.io/avargaskun/arrstalledhandler:latest
     container_name: ArrStalledHandler
     restart: unless-stopped
     environment:
@@ -237,12 +237,12 @@ docker run -d \
   -e QBITTORRENT_PASSWORD=adminpass \
   -e IGNORE_TORRENT_TAGS=slow,manual,keep \
   --restart unless-stopped \
-  tommythebeast/arrstalledhandler:latest
+  ghcr.io/avargaskun/arrstalledhandler:latest
 ```
 
 *One line:*
 ``` bash
-docker run -d --name=ArrStalledHandler -e RADARR_URL=http://localhost:7878,http://otherhost:7878 -e RADARR_API_KEY=your_radarr_api_key,your_2nd_radarr_api_key -e SONARR_URL=http://localhost:8989,http://otherhost:8989 -e SONARR_API_KEY=your_sonarr_api_key,your_2nd_sonarr_api_key -e LIDARR_URL=http://localhost:8686,http://otherhost:8686  -e LIDARR_API_KEY=your_lidarr_api_key,your_2nd_lidarr_api_key -e READARR_URL=http://localhost:8787,http://otherhost:8787 -e READARR_API_KEY=your_readarr_api_key,our_2nd_readarr_api_key -e QBITTORRENT_URL=http://localhost:8080 -e QBITTORRENT_USERNAME=admin -e QBITTORRENT_PASSWORD=adminpass -e IGNORE_TORRENT_TAGS=slow,manual,keep -e STALLED_TIMEOUT=3600 -e STALLED_ACTION=BLOCKLIST_AND_SEARCH -e VERBOSE=false -e RUN_INTERVAL=300 -e COUNT_DOWNLOADING_METADATA_AS_STALLED=false --restart unless-stopped tommythebeast/arrstalledhandler:latest
+docker run -d --name=ArrStalledHandler -e RADARR_URL=http://localhost:7878,http://otherhost:7878 -e RADARR_API_KEY=your_radarr_api_key,your_2nd_radarr_api_key -e SONARR_URL=http://localhost:8989,http://otherhost:8989 -e SONARR_API_KEY=your_sonarr_api_key,your_2nd_sonarr_api_key -e LIDARR_URL=http://localhost:8686,http://otherhost:8686  -e LIDARR_API_KEY=your_lidarr_api_key,your_2nd_lidarr_api_key -e READARR_URL=http://localhost:8787,http://otherhost:8787 -e READARR_API_KEY=your_readarr_api_key,our_2nd_readarr_api_key -e QBITTORRENT_URL=http://localhost:8080 -e QBITTORRENT_USERNAME=admin -e QBITTORRENT_PASSWORD=adminpass -e IGNORE_TORRENT_TAGS=slow,manual,keep -e STALLED_TIMEOUT=3600 -e STALLED_ACTION=BLOCKLIST_AND_SEARCH -e VERBOSE=false -e RUN_INTERVAL=300 -e COUNT_DOWNLOADING_METADATA_AS_STALLED=false --restart unless-stopped ghcr.io/avargaskun/arrstalledhandler:latest
 ```
 
 ### Docker Deployment (Manual)
