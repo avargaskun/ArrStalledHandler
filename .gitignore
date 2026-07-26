@@ -176,3 +176,6 @@ __pypackages__/
 # Localizations
 *.mo
 *.pot
+
+# Ralph-loop
+ralph/

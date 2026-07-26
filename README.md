@@ -340,6 +340,26 @@ docker run -d --name=ArrStalledHandler -e RADARR_URL=http://localhost:7878,http:
 
 ----------
 
+## Development
+
+The test suite lives in `tests/` and runs with pytest on Python 3.13:
+
+``` bash
+python3 -m venv .venv
+./.venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+./.venv/bin/pytest
+```
+
+Coverage is measured on every run (configured in `pyproject.toml`), and the suite fails if `main.py` coverage drops below 85%. The gate applies to *any* pytest invocation, so running a subset of tests fails the threshold even when every selected test passes — disable coverage for partial runs:
+
+``` bash
+./.venv/bin/pytest tests/test_config.py --no-cov
+```
+
+CI runs the full suite in the `tests` job on every PR to `main`, alongside the Docker image build.
+
+----------
+
 ## Logging
 
 -   Logs are written to the console and are controlled by the `VERBOSE` environment variable.
