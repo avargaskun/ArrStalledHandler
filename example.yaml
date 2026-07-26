@@ -1,0 +1,115 @@
+# ArrStalledHandler configuration (schema version 1).
+#
+# Mount this file at /data/config.yaml (or point CONFIG_FILE at another path).
+# A missing file is not an error: the app then runs purely from environment
+# variables. A file that is present but invalid is a fatal startup error.
+#
+# Precedence:
+#   - Lists (arrApps, downloaders, watchers) are section-level. If a section is
+#     present here, the matching environment variables are ignored entirely.
+#   - Scalars are key-level. Omit a key and its environment fallback applies.
+#
+# Durations accept a plain number of seconds (3600) or a compound value in
+# strict d/h/m/s order with at least one component: 45s, 5m, 1h30m, 2d.
+
+version: 1                                # required; must be 1
+
+# How long to wait between polling cycles.
+# Duration. Env fallback: RUN_INTERVAL. Default: 300 (5m).
+runInterval: 5m
+
+log:
+  # Enable debug logging.
+  # Env fallback: VERBOSE. Default: false.
+  verbose: false
+
+# Built-in HTTP health endpoint (GET /ping -> 200). YAML-only, no env fallback.
+healthCheck:
+  enabled: true                           # default: true
+  port: 9898                              # default: 9898
+
+# SQLite file used to track how long each download has been stalled.
+# Relative paths resolve against the working directory. YAML-only.
+# Default: stalled_downloads.db
+dbFile: stalled_downloads.db
+
+# Treat downloads reported as "qBittorrent is downloading metadata" as stalled.
+# Env fallback: COUNT_DOWNLOADING_METADATA_AS_STALLED. Default: false.
+countDownloadingMetadataAsStalled: true
+
+# The *arr instances to poll. When this section is present, every
+# RADARR_URL / RADARR_API_KEY / SONARR_* / LIDARR_* / READARR_* variable is ignored.
+arrApps:
+  - type: radarr                          # required: radarr | sonarr | lidarr | readarr
+    name: anime-movies                    # required; unique; shown in logs AND used as the
+                                          #   database key, so renaming resets that instance's
+                                          #   in-flight stall timers once
+    url: localhost:7878                   # required; "http://" is prefixed when no scheme is given
+    apiKey: xxxyyyzzz                     # required
+    forceSearch: true                     # optional; default true. When a *_SEARCH action runs,
+                                          #   send an explicit Command API search (MoviesSearch /
+                                          #   EpisodeSearch). Set false to rely on the *arr server's
+                                          #   own auto-search and avoid duplicate searches.
+                                          #   Lidarr/Readarr never get an explicit search.
+  - type: sonarr
+    name: tv
+    url: http://localhost:8989
+    apiKey: aaabbbccc
+
+# Download client used to read torrent tags for watcher matching.
+# When this section is present, QBITTORRENT_* variables are ignored.
+# Optional: without a downloader, watchers that declare tags can never match.
+downloaders:
+  # NOTE: the schema is a list for forward compatibility, but exactly one entry
+  # is allowed today. Matching queue items to multiple downloaders by the *arr
+  # item's downloadClient name is future work.
+  - type: qbittorrent                     # required; only supported value
+    name: default                         # required; unique
+    url: localhost:8080                   # required; scheme normalized like arrApps.url
+    username: admin                       # optional (omit when the Web UI bypasses auth)
+    password: adminpass                   # optional
+
+# Policy blocks. Walked in order for every stalled queue item; the first match wins.
+# When this section is present, STALLED_TIMEOUT / STALLED_ACTION /
+# IGNORE_TORRENT_TAGS are ignored.
+watchers:
+  - name: seeding-protection
+    # Torrent tags to match, OR-ed and compared case-insensitively. Requires a
+    # downloader and a queue item whose download client is qBittorrent; items
+    # from any other client simply fall through to the next watcher.
+    # Omit (or leave empty) to match every download — that makes the block a
+    # catch-all, so anything after it is unreachable.
+    tags: [keep, private]
+    stalledTimeout: 6h                    # optional duration; default 1h
+    action: IGNORE                        # optional; default REMOVE_AND_BLOCKLIST_SEARCH
+
+  - name: default
+    stalledTimeout: 1h
+    action: REMOVE_AND_BLOCKLIST_SEARCH
+
+# If the last watcher still declares tags, an implicit catch-all
+# (1h / REMOVE_AND_BLOCKLIST_SEARCH) is appended so every item matches something.
+# To leave untagged downloads alone instead, end the list with an explicit
+# catch-all using `action: IGNORE`.
+#
+# Available actions (the first four columns are the *arr queue DELETE parameters):
+#
+#   action                               | removeFromClient | changeCategory | blocklist | skipRedownload
+#   -------------------------------------|------------------|----------------|-----------|---------------
+#   REMOVE                               | true             | false          | false     | false
+#   REMOVE_AND_BLOCKLIST                 | true             | false          | true      | true
+#   REMOVE_AND_BLOCKLIST_SEARCH          | true             | false          | true      | false
+#   CHANGE_CATEGORY                      | false            | true           | false     | false
+#   CHANGE_CATEGORY_AND_BLOCKLIST        | false            | true           | true      | true
+#   CHANGE_CATEGORY_AND_BLOCKLIST_SEARCH | false            | true           | true      | false
+#   KEEP                                 | false            | false          | false     | false
+#   KEEP_AND_BLOCKLIST                   | false            | false          | true      | true
+#   KEEP_AND_BLOCKLIST_SEARCH            | false            | false          | true      | false
+#   IGNORE                               | no API call at all; the item is left untouched
+#
+# Legacy STALLED_ACTION names still work: REMOVE, BLOCKLIST
+# (= REMOVE_AND_BLOCKLIST) and BLOCKLIST_AND_SEARCH (= REMOVE_AND_BLOCKLIST_SEARCH).
+#
+# CHANGE_CATEGORY* is unverified on Lidarr/Readarr (v1 API); those servers may
+# ignore the parameter and simply drop the item from the queue. A startup
+# warning is logged when the combination is configured.

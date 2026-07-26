@@ -1,4 +1,5 @@
 import logging
+import pathlib
 import textwrap
 
 import pytest
@@ -816,3 +817,64 @@ def test_importing_main_has_no_config_side_effects(monkeypatch, tmp_path, caplog
     assert called == []
     assert caplog.records == []
     assert reloaded.main is not None
+
+
+SECRET_KEY = "SUPERSECRETAPIKEY"
+SECRET_PASSWORD = "SUPERSECRETPASSWORD"
+
+YAML_SECRETS_WITH_ERRORS = f"""
+version: 1
+arrApps:
+  - type: bogus
+    name: a
+    url: localhost:7878
+    apiKey: {SECRET_KEY}
+    forceSearch: notabool
+downloaders:
+  - type: qbittorrent
+    name: d
+    url: localhost:8080
+    username: admin
+    password: {SECRET_PASSWORD}
+    bogusKey: 1
+watchers:
+  - name: w
+    stalledTimeout: 5x
+    action: NOPE
+"""
+
+
+def test_validation_errors_never_log_secrets(tmp_path, caplog):
+    errors = assert_exits(caplog, "arrApps.0.type", "downloaders.0.bogusKey",
+                          "watchers.0.stalledTimeout", "watchers.0.action",
+                          config_path=write_yaml(tmp_path, YAML_SECRETS_WITH_ERRORS),
+                          environ={})
+
+    assert SECRET_KEY not in errors
+    assert SECRET_PASSWORD not in errors
+
+
+def test_shipped_example_yaml_is_valid():
+    """example.yaml is the canonical schema documentation; it must actually load."""
+    example = pathlib.Path(__file__).resolve().parent.parent / "example.yaml"
+    cfg = config.load_config(str(example), environ={})
+
+    assert [a.name for a in cfg.arr_apps] == ["anime-movies", "tv"]
+    assert cfg.downloader.name == "default"
+    assert cfg.watchers[0].action is config.QueueItemDisposition.IGNORE
+    assert cfg.watchers[-1].tags == ()
+
+
+def test_bad_api_key_type_does_not_log_its_value(tmp_path, caplog):
+    errors = assert_exits(caplog, "arrApps.0.apiKey",
+                          config_path=write_yaml(tmp_path, f"""
+version: 1
+arrApps:
+  - type: radarr
+    name: a
+    url: localhost:7878
+    apiKey: [{SECRET_KEY}]
+"""),
+                          environ={})
+
+    assert SECRET_KEY not in errors

@@ -17,7 +17,10 @@ services:
       QBITTORRENT_PASSWORD: "${QBITTORRENT_PASSWORD}" # qBittorrent WebUI password
       IGNORE_TORRENT_TAGS: "${IGNORE_TORRENT_TAGS}" # Comma-separated qBittorrent tags whose torrents are never handled
       STALLED_TIMEOUT: "${STALLED_TIMEOUT}" # How long a download should be stalled before handling it (in seconds)
-      STALLED_ACTION: "${STALLED_ACTION}" # Options: REMOVE or BLOCKLIST or BLOCKLIST_AND_SEARCH
+      STALLED_ACTION: "${STALLED_ACTION}" # Options: REMOVE or BLOCKLIST or BLOCKLIST_AND_SEARCH (new disposition names are also accepted)
       VERBOSE: "${VERBOSE}" # Enable verbose/debug logging
       RUN_INTERVAL: "${RUN_INTERVAL}" # How often should the script be run (in seconds)
       COUNT_DOWNLOADING_METADATA_AS_STALLED: "${COUNT_DOWNLOADING_METADATA_AS_STALLED}" # If it should count downloads with the "Downloading Metadata" as stalled
+    # Uncomment to provide a YAML config file (see README "YAML configuration"):
+    # volumes:
+    #   - ./config.yaml:/data/config.yaml:ro
