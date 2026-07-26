@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 
 
@@ -74,3 +75,61 @@ def test_add_and_remove_accept_int_download_id(load_main):
     m.remove_stalled_download_from_db(7, "Radarr0")
 
     assert m.get_stalled_downloads_from_db("Radarr0") == {}
+
+
+def test_db_file_parameter_isolates_databases(load_main, tmp_path):
+    m = load_main({})
+    other = str(tmp_path / "other.db")
+    m.initialize_database()
+    m.initialize_database(db_file=other)
+
+    now = datetime.now(timezone.utc)
+    m.add_stalled_download_to_db("1", now, "Radarr0", db_file=other)
+
+    assert m.get_stalled_downloads_from_db("Radarr0") == {}
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=other) == {"1": now}
+
+    m.remove_stalled_download_from_db("1", "Radarr0", db_file=other)
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=other) == {}
+
+
+def test_prune_removes_unconfigured_services(load_main, tmp_path, caplog):
+    m = load_main({})
+    db = str(tmp_path / "prune.db")
+    m.initialize_database(db_file=db)
+
+    now = datetime.now(timezone.utc)
+    m.add_stalled_download_to_db("1", now, "Radarr0", db_file=db)
+    m.add_stalled_download_to_db("2", now, "Sonarr0", db_file=db)
+    m.add_stalled_download_to_db("3", now, "lidarr0", db_file=db)
+
+    with caplog.at_level(logging.INFO):
+        assert m.prune_orphaned_services(db, ["Radarr0", "Sonarr0"]) == 1
+
+    assert list(m.get_stalled_downloads_from_db("Radarr0", db_file=db)) == ["1"]
+    assert list(m.get_stalled_downloads_from_db("Sonarr0", db_file=db)) == ["2"]
+    assert m.get_stalled_downloads_from_db("lidarr0", db_file=db) == {}
+    assert "Pruned 1" in caplog.text
+
+
+def test_prune_keeps_everything_when_all_configured(load_main, tmp_path, caplog):
+    m = load_main({})
+    db = str(tmp_path / "prune.db")
+    m.initialize_database(db_file=db)
+    m.add_stalled_download_to_db("1", datetime.now(timezone.utc), "Radarr0", db_file=db)
+
+    with caplog.at_level(logging.INFO):
+        assert m.prune_orphaned_services(db, ["Radarr0"]) == 0
+
+    assert list(m.get_stalled_downloads_from_db("Radarr0", db_file=db)) == ["1"]
+    assert "Pruned" not in caplog.text
+
+
+def test_prune_with_no_configured_names_clears_table(load_main, tmp_path):
+    m = load_main({})
+    db = str(tmp_path / "prune.db")
+    m.initialize_database(db_file=db)
+    m.add_stalled_download_to_db("1", datetime.now(timezone.utc), "Radarr0", db_file=db)
+
+    assert m.prune_orphaned_services(db, []) == 1
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=db) == {}

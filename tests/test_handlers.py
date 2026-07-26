@@ -129,7 +129,6 @@ def test_ignored_tag_skips_tracking(load_main):
     m.initialize_database()
     responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
     responses.post(f"{QBIT}/api/v2/auth/login", body="Ok.")
-    responses.get(f"{QBIT}/api/v2/torrents/properties", json={"name": "release"})
     responses.get(f"{QBIT}/api/v2/torrents/info", json=[{"tags": "slow"}])
 
     m.handle_stalled_downloads(RADARR, "key", "Radarr0", "v3")

@@ -54,13 +54,9 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-# qBittorrent session management
-qbit_session = None
-qbit_cookies = None
-
-def initialize_database():
+def initialize_database(db_file=DB_FILE):
     """Initialize the SQLite database for tracking stalled downloads."""
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
 
     # Create the table with the new schema
@@ -76,9 +72,9 @@ def initialize_database():
     conn.commit()
     conn.close()
 
-def get_stalled_downloads_from_db(arr_service):
+def get_stalled_downloads_from_db(arr_service, db_file=DB_FILE):
     """Retrieve stalled downloads for a specific service from the database."""
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
 
     # Fetch all records for the specific service
@@ -89,9 +85,9 @@ def get_stalled_downloads_from_db(arr_service):
     # Convert download_id to string and timestamps to datetime
     return {str(row[0]): datetime.fromisoformat(row[1]) for row in rows}
 
-def add_stalled_download_to_db(download_id, first_detected, arr_service):
+def add_stalled_download_to_db(download_id, first_detected, arr_service, db_file=DB_FILE):
     """Add a stalled download to the database if it does not already exist."""
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
 
     # Insert only if the (download_id, arr_service) pair does not already exist
@@ -106,9 +102,9 @@ def add_stalled_download_to_db(download_id, first_detected, arr_service):
 
     return added
 
-def remove_stalled_download_from_db(download_id, arr_service):
+def remove_stalled_download_from_db(download_id, arr_service, db_file=DB_FILE):
     """Remove a stalled download entry from the database."""
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
 
     # Delete the record for the specific service
@@ -116,6 +112,27 @@ def remove_stalled_download_from_db(download_id, arr_service):
 
     conn.commit()
     conn.close()
+
+def prune_orphaned_services(db_file, configured_names):
+    """Delete tracking rows whose arr_service no longer matches a configured instance."""
+    names = list(configured_names)
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+
+    if names:
+        placeholders = ",".join("?" for _ in names)
+        cursor.execute(f"DELETE FROM stalled_downloads WHERE arr_service NOT IN ({placeholders})", names)
+    else:
+        cursor.execute("DELETE FROM stalled_downloads")
+
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+
+    if deleted > 0:
+        logging.info(f"Pruned {deleted} tracking row(s) for services no longer configured.")
+
+    return deleted
 
 def query_api(url, headers, params=None):
     """Query an API endpoint and return the JSON response."""
@@ -143,115 +160,110 @@ def delete_api(url, headers, params=None):
     except requests.RequestException as e:
         logging.error(f"API DELETE Error: {e}")
 
-def qbittorrent_login():
-    """Login to qBittorrent and store session cookies."""
-    global qbit_session, qbit_cookies
-    
-    if not QBITTORRENT_URL:
-        return False
-    
-    try:
-        qbit_session = requests.Session()
-        login_url = f"{QBITTORRENT_URL}/api/v2/auth/login"
-        login_data = {
-            'username': QBITTORRENT_USERNAME,
-            'password': QBITTORRENT_PASSWORD
-        }
-        
-        response = qbit_session.post(login_url, data=login_data)
-        response.raise_for_status()
-        
-        if response.text.strip().lower() in ('ok.', ''):  # '' = WebUI auth bypass (whitelisted subnet) returns 204
-            qbit_cookies = qbit_session.cookies
-            logging.info("Successfully logged into qBittorrent")
-            return True
-        else:
+class QbitClient:
+    """qBittorrent Web API client owning its session, login and tag lookups."""
+
+    def __init__(self, url, username=None, password=None):
+        self.url = url
+        self.username = username
+        self.password = password
+        self.session = None
+        self.cookies = None
+
+    def login(self):
+        self.cookies = None
+        try:
+            self.session = requests.Session()
+            login_data = {'username': self.username, 'password': self.password}
+            response = self.session.post(f"{self.url}/api/v2/auth/login", data=login_data)
+            response.raise_for_status()
+
+            if response.text.strip().lower() in ('ok.', ''):  # '' = WebUI auth bypass (whitelisted subnet) returns 204
+                self.cookies = self.session.cookies
+                logging.info("Successfully logged into qBittorrent")
+                return True
+
             logging.error(f"qBittorrent login failed: {response.text}")
             return False
-            
-    except requests.RequestException as e:
-        logging.error(f"qBittorrent login error: {e}")
-        return False
 
-def get_torrent_info_by_hash(info_hash):
-    """Get torrent information from qBittorrent by info hash."""
-    global qbit_session, qbit_cookies
-    
-    if not QBITTORRENT_URL or not info_hash:
-        return None
-    
-    # Ensure we're logged in
-    if not qbit_session or not qbit_cookies:
-        if not qbittorrent_login():
-            return None
-    
-    try:
-        # Get torrent properties
-        props_url = f"{QBITTORRENT_URL}/api/v2/torrents/properties"
-        response = qbit_session.get(props_url, params={'hash': info_hash.lower()}, cookies=qbit_cookies)
-        
-        # If we get a 403, try to re-login
-        if response.status_code == 403:
-            logging.info("qBittorrent session expired, re-logging in...")
-            if qbittorrent_login():
-                response = qbit_session.get(props_url, params={'hash': info_hash.lower()}, cookies=qbit_cookies)
-            else:
-                return None
-        
-        if not response.ok:
-            logging.debug(f"qBittorrent request failed with {response.status_code}")
+        except requests.RequestException as e:
+            logging.error(f"qBittorrent login error: {e}")
             return False
 
-        torrent_info = response.json()
-        
-        # Get torrent tags separately
-        info_url = f"{QBITTORRENT_URL}/api/v2/torrents/info"
-        response = qbit_session.get(info_url, params={'hashes': info_hash.lower()}, cookies=qbit_cookies)
-        response.raise_for_status()
-        
-        info_data = response.json()
-        if info_data and len(info_data) > 0:
-            torrent_info['tags'] = info_data[0].get('tags', '').split(', ') if info_data[0].get('tags') else []
-        else:
-            torrent_info['tags'] = []
-        
-        return torrent_info
-        
-    except requests.RequestException as e:
-        logging.error(f"Error getting torrent info from qBittorrent: {e}")
-        return None
+    def get_tags(self, info_hash):
+        """Return the torrent's tags, [] when qBittorrent doesn't know the hash, None on failure."""
+        if not info_hash:
+            return None
+
+        # An auth-bypass login yields an empty cookie jar, so identity — not truthiness — decides.
+        if self.session is None or self.cookies is None:
+            if not self.login():
+                return None
+
+        info_url = f"{self.url}/api/v2/torrents/info"
+        params = {'hashes': info_hash.lower()}
+
+        try:
+            response = self.session.get(info_url, params=params, cookies=self.cookies)
+
+            if response.status_code == 403:
+                logging.info("qBittorrent session expired, re-logging in...")
+                if not self.login():
+                    return None
+                response = self.session.get(info_url, params=params, cookies=self.cookies)
+
+            if not response.ok:
+                logging.debug(f"qBittorrent request failed with {response.status_code}")
+                return None
+
+            info_data = response.json()
+            if not info_data:
+                return []
+
+            tags = info_data[0].get('tags', '')
+            return tags.split(', ') if tags else []
+
+        except requests.RequestException as e:
+            logging.error(f"Error getting torrent info from qBittorrent: {e}")
+            return None
+
+# TEMP bridge — removed in Phase 5
+_qbit_client = None
 
 def should_ignore_download(item):
     """Check if a download should be ignored based on torrent tags."""
+    global _qbit_client  # TEMP bridge — removed in Phase 5
+
     if not QBITTORRENT_URL or not IGNORE_TORRENT_TAGS:
         return False
-    
+
     # Get the download client info
     download_client = item.get('downloadClient', '').lower()
     if 'qbittorrent' not in download_client:
         logging.debug(f"Download client '{download_client}' is not qBittorrent, not checking tags")
         return False
-    
+
     # Get the info hash from the download
     download_id = item.get('downloadId')
     if not download_id:
         logging.debug("No downloadId found in queue item")
         return False
-    
+
+    if _qbit_client is None:  # TEMP bridge — removed in Phase 5
+        _qbit_client = QbitClient(QBITTORRENT_URL, QBITTORRENT_USERNAME, QBITTORRENT_PASSWORD)
+
     # The downloadId from *arr apps is typically the torrent hash
-    torrent_info = get_torrent_info_by_hash(download_id)
-    if not torrent_info:
+    torrent_tags = _qbit_client.get_tags(download_id)
+    if torrent_tags is None:
         logging.warning(f"Could not get torrent info for hash: {download_id}")
         return False
-    
+
     # Check if any of the torrent's tags match our ignore list
-    torrent_tags = torrent_info.get('tags', [])
-    if torrent_tags:
-        for tag in torrent_tags:
-            if tag in IGNORE_TORRENT_TAGS:
-                logging.info(f"Ignoring download '{item.get('title')}' due to torrent tag: {tag}")
-                return True
-    
+    for tag in torrent_tags:
+        if tag in IGNORE_TORRENT_TAGS:
+            logging.info(f"Ignoring download '{item.get('title')}' due to torrent tag: {tag}")
+            return True
+
     return False
 
 def detect_stuck_metadata_downloads(base_url, api_key, service_name, api_version):

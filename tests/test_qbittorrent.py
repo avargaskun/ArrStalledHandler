@@ -13,7 +13,6 @@ QBIT_ENV = {
 }
 
 LOGIN_URL = f"{QBIT}/api/v2/auth/login"
-PROPS_URL = f"{QBIT}/api/v2/torrents/properties"
 INFO_URL = f"{QBIT}/api/v2/torrents/info"
 
 
@@ -21,85 +20,131 @@ def gets():
     return [c for c in responses.calls if c.request.method == "GET"]
 
 
-@responses.activate
-def test_login_no_url_returns_false(load_main):
+def posts():
+    return [c for c in responses.calls if c.request.method == "POST"]
+
+
+@pytest.fixture
+def client(load_main):
+    """A QbitClient built from a freshly reloaded main (no env needed)."""
     m = load_main({})
-
-    assert m.qbittorrent_login() is False
-    assert len(responses.calls) == 0
+    return m.QbitClient(QBIT, "admin", "pw")
 
 
 @responses.activate
-def test_login_ok(load_main):
-    m = load_main(QBIT_ENV)
+def test_login_ok(client):
     responses.post(LOGIN_URL, body="Ok.")
 
-    assert m.qbittorrent_login() is True
-    assert "username=admin" in responses.calls[0].request.body
-    assert "password=pw" in responses.calls[0].request.body
+    assert client.login() is True
+    assert "username=admin" in posts()[0].request.body
+    assert "password=pw" in posts()[0].request.body
 
 
 @responses.activate
-def test_login_empty_body_auth_bypass(load_main):
-    m = load_main(QBIT_ENV)
+def test_login_empty_body_auth_bypass(client):
     responses.post(LOGIN_URL, body="", status=204)
 
-    assert m.qbittorrent_login() is True
+    assert client.login() is True
 
 
 @responses.activate
-def test_login_fails_body(load_main):
-    m = load_main(QBIT_ENV)
+def test_login_fails_body(client):
     responses.post(LOGIN_URL, body="Fails.")
 
-    assert m.qbittorrent_login() is False
+    assert client.login() is False
+    assert client.cookies is None
 
 
 @responses.activate
-def test_login_connection_error(load_main):
-    m = load_main(QBIT_ENV)
+def test_login_connection_error(client):
     responses.post(LOGIN_URL, body=requests.exceptions.ConnectionError())
 
-    assert m.qbittorrent_login() is False
+    assert client.login() is False
 
 
 @responses.activate
-def test_torrent_info_happy_path(load_main):
-    m = load_main(QBIT_ENV)
+def test_get_tags_happy_path(client):
     responses.post(LOGIN_URL, body="Ok.")
-    responses.get(PROPS_URL, json={"name": "release"})
     responses.get(INFO_URL, json=[{"tags": "a, b"}])
+
+    assert client.get_tags("ABC123HASH") == ["a", "b"]
+    assert all("abc123hash" in call.request.url for call in gets())
+
+
+@responses.activate
+def test_get_tags_empty_tag_string(client):
+    responses.post(LOGIN_URL, body="Ok.")
     responses.get(INFO_URL, json=[{"tags": ""}])
 
-    info = m.get_torrent_info_by_hash("ABC123HASH")
-
-    assert info["tags"] == ["a", "b"]
-    assert all("abc123hash" in call.request.url for call in gets())
-    assert m.get_torrent_info_by_hash("ABC123HASH")["tags"] == []
+    assert client.get_tags("ABC123HASH") == []
 
 
 @responses.activate
-def test_torrent_info_relogin_on_403(load_main):
-    m = load_main(QBIT_ENV)
+def test_get_tags_logs_in_once(client):
     responses.post(LOGIN_URL, body="Ok.")
-    responses.get(PROPS_URL, status=403)
-    responses.get(PROPS_URL, json={"name": "release"})
     responses.get(INFO_URL, json=[{"tags": "slow"}])
 
-    info = m.get_torrent_info_by_hash("ABC123HASH")
-
-    assert info["tags"] == ["slow"]
-    assert len([c for c in responses.calls if c.request.method == "POST"]) == 2
+    assert client.get_tags("ABC123HASH") == ["slow"]
+    assert client.get_tags("ABC123HASH") == ["slow"]
+    assert len(posts()) == 1
 
 
 @responses.activate
-def test_torrent_info_non_ok_returns_false(load_main):
-    m = load_main(QBIT_ENV)
+def test_get_tags_relogin_on_403(client):
     responses.post(LOGIN_URL, body="Ok.")
-    responses.get(PROPS_URL, status=404)
+    responses.get(INFO_URL, status=403)
+    responses.get(INFO_URL, json=[{"tags": "slow"}])
 
-    # D4: this path returns False where other failures return None; callers only truthiness-check.
-    assert m.get_torrent_info_by_hash("ABC123HASH") is False
+    assert client.get_tags("ABC123HASH") == ["slow"]
+    assert len(posts()) == 2
+
+
+@responses.activate
+def test_get_tags_relogin_failure_returns_none(client):
+    responses.post(LOGIN_URL, body="Ok.")
+    responses.post(LOGIN_URL, body="Fails.")
+    responses.get(INFO_URL, status=403)
+
+    assert client.get_tags("ABC123HASH") is None
+
+
+@responses.activate
+def test_get_tags_login_failure_returns_none(client):
+    responses.post(LOGIN_URL, body="Fails.")
+
+    assert client.get_tags("ABC123HASH") is None
+    assert gets() == []
+
+
+@responses.activate
+def test_get_tags_non_ok_returns_none(client):
+    responses.post(LOGIN_URL, body="Ok.")
+    responses.get(INFO_URL, status=500)
+
+    assert client.get_tags("ABC123HASH") is None
+
+
+@responses.activate
+def test_get_tags_request_error_returns_none(client):
+    responses.post(LOGIN_URL, body="Ok.")
+    responses.get(INFO_URL, body=requests.exceptions.ConnectionError())
+
+    assert client.get_tags("ABC123HASH") is None
+
+
+@responses.activate
+def test_get_tags_unknown_hash_returns_empty_list(client):
+    responses.post(LOGIN_URL, body="Ok.")
+    responses.get(INFO_URL, json=[])
+
+    # A successful lookup for a hash qBittorrent doesn't know means "no tags", not "failure".
+    assert client.get_tags("ABC123HASH") == []
+
+
+@responses.activate
+def test_get_tags_without_hash_makes_no_calls(client):
+    assert client.get_tags(None) is None
+    assert len(responses.calls) == 0
 
 
 @pytest.mark.parametrize("env", [{}, {"QBITTORRENT_URL": QBIT}])
@@ -131,7 +176,6 @@ def test_should_ignore_missing_download_id(load_main):
 def test_should_ignore_tag_match(load_main):
     m = load_main(QBIT_ENV)
     responses.post(LOGIN_URL, body="Ok.")
-    responses.get(PROPS_URL, json={"name": "release"})
     responses.get(INFO_URL, json=[{"tags": "slow"}])
 
     assert m.should_ignore_download(queue_item()) is True
@@ -141,7 +185,6 @@ def test_should_ignore_tag_match(load_main):
 def test_should_ignore_tag_case_sensitive_no_match(load_main):
     m = load_main(QBIT_ENV)
     responses.post(LOGIN_URL, body="Ok.")
-    responses.get(PROPS_URL, json={"name": "release"})
     responses.get(INFO_URL, json=[{"tags": "Slow"}])
 
     assert m.should_ignore_download(queue_item()) is False
@@ -151,7 +194,7 @@ def test_should_ignore_tag_case_sensitive_no_match(load_main):
 def test_should_ignore_lookup_failure_fails_open(load_main):
     m = load_main(QBIT_ENV)
     responses.post(LOGIN_URL, body="Ok.")
-    responses.get(PROPS_URL, status=500)
+    responses.get(INFO_URL, status=500)
 
     # Fail-open is intended: qBittorrent being unreachable must not disable the handler.
     assert m.should_ignore_download(queue_item()) is False
