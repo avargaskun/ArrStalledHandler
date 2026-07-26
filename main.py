@@ -12,26 +12,25 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 load_dotenv()
 
 # Configuration from .env
-if os.getenv("RADARR_URL") is not None:
-    RADARR_URL = os.getenv("RADARR_URL").split(",")
-    RADARR_API_KEY = os.getenv("RADARR_API_KEY").split(",")
-else:
-    RADARR_URL = None
-if os.getenv("SONARR_URL") is not None:
-    SONARR_URL = os.getenv("SONARR_URL").split(",")
-    SONARR_API_KEY = os.getenv("SONARR_API_KEY").split(",")
-else:
-    SONARR_URL = None
-if os.getenv("LIDARR_URL") is not None:
-    LIDARR_URL = os.getenv("LIDARR_URL").split(",")
-    LIDARR_API_KEY = os.getenv("LIDARR_API_KEY").split(",")
-else:
-    LIDARR_URL = None
-if os.getenv("READARR_URL") is not None:
-    READARR_URL = os.getenv("READARR_URL").split(",")
-    READARR_API_KEY = os.getenv("READARR_API_KEY").split(",")
-else:
-    READARR_URL = None
+def load_service_config(prefix):
+    """Return (urls, api_keys) for a service, or (None, None) if unconfigured."""
+    urls = os.getenv(f"{prefix}_URL")
+    if not urls:  # unset OR empty — README: "leave the URL empty" disables the service
+        return None, None
+    keys = os.getenv(f"{prefix}_API_KEY")
+    urls = urls.split(",")
+    keys = keys.split(",") if keys else []
+    if len(keys) != len(urls):
+        raise SystemExit(
+            f"{prefix}_URL has {len(urls)} entries but {prefix}_API_KEY has {len(keys)}; "
+            f"each URL needs a matching API key"
+        )
+    return urls, keys
+
+RADARR_URL, RADARR_API_KEY = load_service_config("RADARR")
+SONARR_URL, SONARR_API_KEY = load_service_config("SONARR")
+LIDARR_URL, LIDARR_API_KEY = load_service_config("LIDARR")
+READARR_URL, READARR_API_KEY = load_service_config("READARR")
 
 # qBittorrent configuration
 QBITTORRENT_URL = os.getenv("QBITTORRENT_URL")
@@ -40,10 +39,10 @@ QBITTORRENT_PASSWORD = os.getenv("QBITTORRENT_PASSWORD")
 IGNORE_TORRENT_TAGS = os.getenv("IGNORE_TORRENT_TAGS", "").split(",") if os.getenv("IGNORE_TORRENT_TAGS") else []
 IGNORE_TORRENT_TAGS = [tag.strip() for tag in IGNORE_TORRENT_TAGS if tag.strip()]  # Clean up tags
 
-STALLED_TIMEOUT = int(os.getenv("STALLED_TIMEOUT", 3600))
-STALLED_ACTION = os.getenv("STALLED_ACTION", "BLOCKLIST_AND_SEARCH").upper()
+STALLED_TIMEOUT = int(os.getenv("STALLED_TIMEOUT") or 3600)
+STALLED_ACTION = (os.getenv("STALLED_ACTION") or "BLOCKLIST_AND_SEARCH").upper()
 VERBOSE = os.getenv("VERBOSE", "false").lower() == "true"
-RUN_INTERVAL = int(os.getenv("RUN_INTERVAL", 300))  # Default to 300 seconds
+RUN_INTERVAL = int(os.getenv("RUN_INTERVAL") or 300)  # Default to 300 seconds
 COUNT_DOWNLOADING_METADATA_AS_STALLED = os.getenv("COUNT_DOWNLOADING_METADATA_AS_STALLED", "false").lower() == "true"
 
 DB_FILE = "stalled_downloads.db"
@@ -61,9 +60,6 @@ qbit_cookies = None
 
 def initialize_database():
     """Initialize the SQLite database for tracking stalled downloads."""
-    if STALLED_TIMEOUT == 0:
-        return  # Skip DB initialization if timeout is 0
-
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
@@ -272,7 +268,7 @@ def detect_stuck_metadata_downloads(base_url, api_key, service_name, api_version
     params = {
         "protocol": "torrent",
         "status": "queued",  # Only look for queued downloads
-        "includeEpisode": "true" if service_name == "Sonarr" else "false"
+        "includeEpisode": "true" if service_name.startswith("Sonarr") else "false"
     }
 
     logging.info(f"Checking for stuck downloads ('Downloading Metadata') in {service_name}...")
@@ -294,8 +290,8 @@ def detect_stuck_metadata_downloads(base_url, api_key, service_name, api_version
                 continue
                 
             download_id = str(item["id"])
-            movie_id = item.get("movieId") if service_name == "Radarr" else None
-            episode_ids = [item["episodeId"]] if service_name == "Sonarr" and "episodeId" in item else None
+            movie_id = item.get("movieId") if service_name.startswith("Radarr") else None
+            episode_ids = [item["episodeId"]] if service_name.startswith("Sonarr") and "episodeId" in item else None
 
             # Check if this download ID is already tracked in the database
             if download_id in detected_metadata_downloads:
@@ -362,7 +358,7 @@ def perform_action(base_url, headers, download_id, movie_id, service_name, api_v
     action_desc = {
         "REMOVE": f"remove (ID: {download_id})",
         "BLOCKLIST": f"blocklist (ID: {download_id})",
-        "BLOCKLIST_AND_SEARCH": f"blocklist and search (ID: {download_id}, {'Episodes' if service_name == 'Sonarr' else 'Movie'}: {episode_ids if service_name == 'Sonarr' else movie_id})"
+        "BLOCKLIST_AND_SEARCH": f"blocklist and search (ID: {download_id}, {'Episodes' if service_name.startswith('Sonarr') else 'Movie'}: {episode_ids if service_name.startswith('Sonarr') else movie_id})"
     }.get(STALLED_ACTION, "INVALID ACTION")
 
     if STALLED_ACTION == "REMOVE":
@@ -384,12 +380,12 @@ def perform_action(base_url, headers, download_id, movie_id, service_name, api_v
         delete_api(action_url, headers, params)
 
         # Trigger a search via the Command API
-        if service_name == "Sonarr" and episode_ids:
+        if service_name.startswith("Sonarr") and episode_ids:
             command_url = f"{base_url}/api/{api_version}/command"
             data = {"name": "EpisodeSearch", "episodeIds": episode_ids}
             logging.info(f"Triggering search for Episodes {episode_ids} in {service_name} using Command API...")
             post_api(command_url, headers, data)
-        elif service_name == "Radarr" and movie_id:
+        elif service_name.startswith("Radarr") and movie_id:
             command_url = f"{base_url}/api/{api_version}/command"
             data = {"name": "MoviesSearch", "movieIds": [movie_id]}
             logging.info(f"Triggering search for Movie ID {movie_id} in {service_name} using Command API...")
@@ -410,7 +406,7 @@ def handle_stalled_downloads(base_url, api_key, service_name, api_version):
     params = {
         "protocol": "torrent",
         "status": "warning",  # Only look for stalled downloads
-        "includeEpisode": "true" if service_name == "Sonarr" else "false"
+        "includeEpisode": "true" if service_name.startswith("Sonarr") else "false"
     }
 
     headers = {"X-Api-Key": api_key}
@@ -430,8 +426,8 @@ def handle_stalled_downloads(base_url, api_key, service_name, api_version):
                 continue
 
             download_id = str(item["id"])
-            movie_id = item.get("movieId") if service_name == "Radarr" else None
-            episode_ids = [item["episodeId"]] if service_name == "Sonarr" and "episodeId" in item else None
+            movie_id = item.get("movieId") if service_name.startswith("Radarr") else None
+            episode_ids = [item["episodeId"]] if service_name.startswith("Sonarr") and "episodeId" in item else None
 
             if download_id in stalled_downloads:
                 first_detected = stalled_downloads[download_id]
