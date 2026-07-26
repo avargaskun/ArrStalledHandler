@@ -1,4 +1,3 @@
-import os
 import sqlite3
 import requests
 import config
@@ -9,20 +8,7 @@ import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# Load environment variables
-load_dotenv()
-
-VERBOSE = os.getenv("VERBOSE", "false").lower() == "true"
-RUN_INTERVAL = int(os.getenv("RUN_INTERVAL") or 300)  # Default to 300 seconds
-
 DB_FILE = "stalled_downloads.db"
-
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG if VERBOSE else logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()]
-)
 
 def initialize_database(db_file=DB_FILE):
     """Initialize the SQLite database for tracking stalled downloads."""
@@ -395,21 +381,31 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
-def start_health_server():
+def start_health_server(port):
     try:
-        server = HTTPServer(('0.0.0.0', 9898), HealthCheckHandler)
-        logging.info("Health check server listening on port 9898")
+        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+        logging.info(f"Health check server listening on port {port}")
         server.serve_forever()
     except Exception as e:
         logging.error(f"Failed to start health check server: {e}")
 # ---------------------------------
 
-if __name__ == "__main__":
-    # Start the health check server in a background thread
-    health_thread = threading.Thread(target=start_health_server, daemon=True)
-    health_thread.start()
+def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.StreamHandler()]
+    )
+
+    load_dotenv()
 
     cfg = config.load_config()
+    if cfg.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    if cfg.health_enabled:
+        threading.Thread(target=start_health_server, args=(cfg.health_port,), daemon=True).start()
+
     initialize_database(cfg.db_file)
     prune_orphaned_services(cfg.db_file, [app.name for app in cfg.arr_apps])
     qbit = QbitClient(
@@ -428,3 +424,6 @@ if __name__ == "__main__":
         logging.info("Script terminated by user.")
     except Exception as e:
         logging.exception(f"An error occurred: {e}")
+
+if __name__ == "__main__":
+    main()

@@ -791,3 +791,28 @@ def test_defaults_to_os_environ(tmp_path, monkeypatch):
     cfg = config.load_config(str(tmp_path / MISSING))
 
     assert [a.url for a in cfg.arr_apps] == ["http://from-os-environ"]
+
+
+def test_importing_main_has_no_config_side_effects(monkeypatch, tmp_path, caplog):
+    """main.py must be import-safe: no env reads, no config load, no logging config."""
+    import importlib
+    import logging as logging_module
+
+    import dotenv
+
+    for var in ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **k: False)
+    monkeypatch.chdir(tmp_path)
+
+    called = []
+    monkeypatch.setattr(config, "load_config", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(logging_module, "basicConfig", lambda *a, **k: called.append(1))
+
+    import main
+    with caplog.at_level(logging.DEBUG):
+        reloaded = importlib.reload(main)
+
+    assert called == []
+    assert caplog.records == []
+    assert reloaded.main is not None
