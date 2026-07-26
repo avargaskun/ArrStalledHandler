@@ -1,12 +1,22 @@
 """Configuration loading, validation and runtime config types."""
 
+import logging
 import os
 import re
+from dataclasses import dataclass
 from enum import Enum
 from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+DEFAULT_CONFIG_PATH = "/data/config.yaml"
+DEFAULT_DB_FILE = "stalled_downloads.db"
+DEFAULT_RUN_INTERVAL = 300
+DEFAULT_STALLED_TIMEOUT = 3600
+DEFAULT_HEALTH_PORT = 9898
+
+_ARR_TYPES = ("radarr", "sonarr", "lidarr", "readarr")
 
 _DIGITS_RE = re.compile(r"^[0-9]+$")
 _DURATION_RE = re.compile(r"^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
@@ -241,3 +251,284 @@ def _load_yaml_model(path):
         return YamlConfigModel.model_validate(data)
     except ValidationError as exc:
         raise ConfigError(_format_validation_errors(exc)) from None
+
+
+@dataclass(frozen=True)
+class ArrApp:
+    type: str
+    name: str
+    url: str
+    api_key: str
+    force_search: bool = True
+
+    @property
+    def api_version(self):
+        return "v3" if self.type in ("radarr", "sonarr") else "v1"
+
+
+@dataclass(frozen=True)
+class Downloader:
+    name: str
+    url: str
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class Watcher:
+    name: str
+    tags: tuple = ()
+    stalled_timeout: int = DEFAULT_STALLED_TIMEOUT
+    action: QueueItemDisposition = QueueItemDisposition.REMOVE_AND_BLOCKLIST_SEARCH
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    run_interval: int = DEFAULT_RUN_INTERVAL
+    verbose: bool = False
+    health_enabled: bool = True
+    health_port: int = DEFAULT_HEALTH_PORT
+    db_file: str = DEFAULT_DB_FILE
+    count_metadata_as_stalled: bool = False
+    arr_apps: tuple = ()
+    downloader: Optional[Downloader] = None
+    watchers: tuple = ()
+
+
+IMPLICIT_DEFAULT_WATCHER = Watcher(
+    name="implicit-default",
+    tags=(),
+    stalled_timeout=DEFAULT_STALLED_TIMEOUT,
+    action=QueueItemDisposition.REMOVE_AND_BLOCKLIST_SEARCH,
+)
+
+
+def _env(environ, key, default=""):
+    """Empty string means unset: compose.yaml renders every absent var as ''."""
+    value = environ.get(key)
+    if value is None:
+        return default
+    value = value.strip()
+    return value if value else default
+
+
+def _env_flag(environ, key):
+    return _env(environ, key, "false").lower() == "true"
+
+
+def _arr_apps_from_env(environ):
+    apps = []
+    for arr_type in _ARR_TYPES:
+        prefix = arr_type.upper()
+        raw_urls = _env(environ, f"{prefix}_URL")
+        if not raw_urls:
+            continue
+        raw_keys = _env(environ, f"{prefix}_API_KEY")
+        urls = raw_urls.split(",")
+        keys = raw_keys.split(",") if raw_keys else []
+        if len(keys) != len(urls):
+            raise ConfigError(
+                f"{prefix}_URL has {len(urls)} entries but {prefix}_API_KEY has {len(keys)}; "
+                f"each URL needs a matching API key"
+            )
+        for index, (url, api_key) in enumerate(zip(urls, keys)):
+            try:
+                url = _normalize_url(url)
+            except ValueError:
+                raise ConfigError(f"{prefix}_URL entry {index} must not be empty") from None
+            apps.append(ArrApp(
+                type=arr_type,
+                name=f"{arr_type.capitalize()}{index}",
+                url=url,
+                api_key=api_key.strip(),
+                force_search=True,
+            ))
+    return apps
+
+
+def _downloader_from_env(environ):
+    url = _env(environ, "QBITTORRENT_URL")
+    if not url:
+        return None
+    return Downloader(
+        name="default",
+        url=_normalize_url(url),
+        username=environ.get("QBITTORRENT_USERNAME") or None,
+        password=environ.get("QBITTORRENT_PASSWORD") or None,
+    )
+
+
+def _watchers_from_env(environ):
+    watchers = []
+    tags = tuple(tag.strip() for tag in _env(environ, "IGNORE_TORRENT_TAGS").split(",") if tag.strip())
+    if tags:
+        watchers.append(Watcher(name="env-ignore-tags", tags=tags, action=QueueItemDisposition.IGNORE))
+
+    raw_timeout = _env(environ, "STALLED_TIMEOUT", str(DEFAULT_STALLED_TIMEOUT))
+    try:
+        timeout = parse_duration(raw_timeout)
+    except ValueError as exc:
+        raise ConfigError(f"STALLED_TIMEOUT: {exc}") from None
+
+    raw_action = _env(environ, "STALLED_ACTION", "BLOCKLIST_AND_SEARCH")
+    try:
+        action = QueueItemDisposition.parse(raw_action)
+    except ValueError as exc:
+        raise ConfigError(f"STALLED_ACTION: {exc}") from None
+
+    watchers.append(Watcher(name="env-default", tags=(), stalled_timeout=timeout, action=action))
+    return watchers
+
+
+def _run_interval_from_env(environ):
+    raw = _env(environ, "RUN_INTERVAL", str(DEFAULT_RUN_INTERVAL))
+    try:
+        return parse_duration(raw)
+    except ValueError as exc:
+        raise ConfigError(f"RUN_INTERVAL: {exc}") from None
+
+
+def _collect(problems, builder, fallback):
+    try:
+        return builder()
+    except ConfigError as exc:
+        problems.extend(exc.messages)
+    return fallback
+
+
+def _watchers_from_model(models):
+    return [
+        Watcher(
+            name=model.name,
+            tags=tuple(model.tags),
+            stalled_timeout=model.stalledTimeout,
+            action=model.action,
+        )
+        for model in models
+    ]
+
+
+def _arr_apps_from_model(models):
+    return [
+        ArrApp(
+            type=model.type,
+            name=model.name,
+            url=model.url,
+            api_key=model.apiKey,
+            force_search=model.forceSearch,
+        )
+        for model in models
+    ]
+
+
+def _downloader_from_model(models):
+    model = models[0]
+    return Downloader(
+        name=model.name,
+        url=model.url,
+        username=model.username,
+        password=model.password,
+    )
+
+
+def _log_warnings(app_config):
+    if app_config.downloader is None and any(watcher.tags for watcher in app_config.watchers):
+        logging.warning(
+            "Watchers define tags but no download client is configured; "
+            "tagged watchers can never match"
+        )
+    uses_change_category = any(
+        watcher.action.name.startswith("CHANGE_CATEGORY") for watcher in app_config.watchers
+    )
+    has_book_or_music = any(app.type in ("lidarr", "readarr") for app in app_config.arr_apps)
+    if uses_change_category and has_book_or_music:
+        logging.warning(
+            "CHANGE_CATEGORY actions are unverified on Lidarr/Readarr; those instances may "
+            "silently ignore changeCategory and only remove the item from the queue"
+        )
+
+
+def _build_config(model, environ):
+    problems = []
+
+    if model is not None and model.arrApps is not None:
+        arr_apps = _arr_apps_from_model(model.arrApps)
+    else:
+        arr_apps = _collect(problems, lambda: _arr_apps_from_env(environ), [])
+
+    if model is not None and model.downloaders is not None:
+        downloader = _downloader_from_model(model.downloaders)
+    else:
+        downloader = _collect(problems, lambda: _downloader_from_env(environ), None)
+
+    if model is not None and model.watchers is not None:
+        watchers = _watchers_from_model(model.watchers)
+    else:
+        watchers = _collect(problems, lambda: _watchers_from_env(environ), [])
+
+    if not watchers or watchers[-1].tags:
+        watchers.append(IMPLICIT_DEFAULT_WATCHER)
+
+    if model is not None and model.runInterval is not None:
+        run_interval = model.runInterval
+    else:
+        run_interval = _collect(problems, lambda: _run_interval_from_env(environ), DEFAULT_RUN_INTERVAL)
+
+    if model is not None and model.log is not None and model.log.verbose is not None:
+        verbose = model.log.verbose
+    else:
+        verbose = _env_flag(environ, "VERBOSE")
+
+    if model is not None and model.countDownloadingMetadataAsStalled is not None:
+        count_metadata = model.countDownloadingMetadataAsStalled
+    else:
+        count_metadata = _env_flag(environ, "COUNT_DOWNLOADING_METADATA_AS_STALLED")
+
+    health = model.healthCheck if model is not None else None
+    db_file = model.dbFile if model is not None and model.dbFile else DEFAULT_DB_FILE
+
+    if not arr_apps:
+        problems.append(
+            "no *arr instances configured; set RADARR_URL/SONARR_URL/LIDARR_URL/READARR_URL "
+            "(with matching API keys) or define an arrApps section in the config file"
+        )
+
+    if problems:
+        raise ConfigError(problems)
+
+    return AppConfig(
+        run_interval=run_interval,
+        verbose=verbose,
+        health_enabled=health.enabled if health is not None else True,
+        health_port=health.port if health is not None else DEFAULT_HEALTH_PORT,
+        db_file=db_file,
+        count_metadata_as_stalled=count_metadata,
+        arr_apps=tuple(arr_apps),
+        downloader=downloader,
+        watchers=tuple(watchers),
+    )
+
+
+def load_config(config_path=None, environ=None):
+    """Load YAML (if present), merge with env fallbacks and return the runtime config.
+
+    Logs every problem and raises SystemExit(1) on any validation failure.
+    """
+    if environ is None:
+        environ = os.environ
+    path = config_path or _env(environ, "CONFIG_FILE") or DEFAULT_CONFIG_PATH
+
+    try:
+        model = _load_yaml_model(path)
+        if model is None:
+            logging.info(f"No config file at {path}; using environment variables only")
+        else:
+            logging.info(f"Loaded configuration from {path}")
+        app_config = _build_config(model, environ)
+    except ConfigError as exc:
+        for message in exc.messages:
+            logging.error(message)
+        raise SystemExit(1) from None
+
+    _log_warnings(app_config)
+    return app_config

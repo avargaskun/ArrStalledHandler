@@ -1,9 +1,11 @@
+import logging
 import textwrap
 
 import pytest
 
 import config
 from config import QueueItemDisposition as Disposition
+from conftest import ENV_VARS
 
 
 def write_yaml(tmp_path, text, name="config.yaml"):
@@ -481,3 +483,395 @@ def test_unreadable_path_is_error(tmp_path):
         config._load_yaml_model(str(directory))
 
     assert "could not be read" in excinfo.value.messages[0]
+
+
+MISSING = "missing.yaml"
+
+
+def load(tmp_path, environ, yaml_text=None, config_path=None):
+    """Run load_config against an optional YAML file and an explicit environment."""
+    path = write_yaml(tmp_path, yaml_text) if yaml_text is not None else str(tmp_path / MISSING)
+    return config.load_config(config_path if config_path is not None else path, environ=environ)
+
+
+FULL_ENV = {
+    "RADARR_URL": "http://radarr-a,http://radarr-b",
+    "RADARR_API_KEY": "k1,k2",
+    "SONARR_URL": "http://sonarr",
+    "SONARR_API_KEY": "k3",
+    "QBITTORRENT_URL": "qbit:8080",
+    "QBITTORRENT_USERNAME": "admin",
+    "QBITTORRENT_PASSWORD": "secret",
+    "STALLED_TIMEOUT": "30m",
+    "STALLED_ACTION": "blocklist",
+    "RUN_INTERVAL": "120",
+    "VERBOSE": "TRUE",
+    "COUNT_DOWNLOADING_METADATA_AS_STALLED": "true",
+}
+
+
+def test_env_only_config(tmp_path):
+    cfg = load(tmp_path, FULL_ENV)
+
+    assert [(a.type, a.name, a.url, a.api_key) for a in cfg.arr_apps] == [
+        ("radarr", "Radarr0", "http://radarr-a", "k1"),
+        ("radarr", "Radarr1", "http://radarr-b", "k2"),
+        ("sonarr", "Sonarr0", "http://sonarr", "k3"),
+    ]
+    assert all(app.force_search for app in cfg.arr_apps)
+    assert cfg.downloader == config.Downloader("default", "http://qbit:8080", "admin", "secret")
+    assert cfg.run_interval == 120
+    assert cfg.verbose is True
+    assert cfg.count_metadata_as_stalled is True
+    assert cfg.health_enabled is True
+    assert cfg.health_port == 9898
+    assert cfg.db_file == "stalled_downloads.db"
+
+    watcher, = cfg.watchers
+    assert watcher.name == "env-default"
+    assert watcher.tags == ()
+    assert watcher.stalled_timeout == 1800
+    assert watcher.action is Disposition.REMOVE_AND_BLOCKLIST
+
+
+def test_env_only_defaults(tmp_path):
+    cfg = load(tmp_path, {"LIDARR_URL": "http://l", "LIDARR_API_KEY": "k"})
+
+    assert cfg.run_interval == 300
+    assert cfg.verbose is False
+    assert cfg.count_metadata_as_stalled is False
+    assert cfg.downloader is None
+    assert [(a.name, a.api_version) for a in cfg.arr_apps] == [("Lidarr0", "v1")]
+    assert cfg.watchers[0].stalled_timeout == 3600
+    assert cfg.watchers[0].action is Disposition.REMOVE_AND_BLOCKLIST_SEARCH
+
+
+def test_empty_scalars_use_defaults_in_load_config(tmp_path):
+    cfg = load(tmp_path, {
+        "RADARR_URL": "http://a", "RADARR_API_KEY": "k",
+        "STALLED_TIMEOUT": "", "RUN_INTERVAL": "", "STALLED_ACTION": "",
+        "VERBOSE": "", "COUNT_DOWNLOADING_METADATA_AS_STALLED": "",
+        "QBITTORRENT_URL": "", "IGNORE_TORRENT_TAGS": "", "SONARR_URL": "",
+    })
+
+    assert cfg.run_interval == 300
+    assert cfg.verbose is False
+    assert cfg.count_metadata_as_stalled is False
+    assert cfg.downloader is None
+    assert [a.name for a in cfg.arr_apps] == ["Radarr0"]
+    assert cfg.watchers[0].stalled_timeout == 3600
+    assert cfg.watchers[0].action is Disposition.REMOVE_AND_BLOCKLIST_SEARCH
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("REMOVE", Disposition.REMOVE),
+    ("BLOCKLIST", Disposition.REMOVE_AND_BLOCKLIST),
+    ("BLOCKLIST_AND_SEARCH", Disposition.REMOVE_AND_BLOCKLIST_SEARCH),
+    ("keep_and_blocklist", Disposition.KEEP_AND_BLOCKLIST),
+])
+def test_legacy_stalled_action_mapping(tmp_path, value, expected):
+    cfg = load(tmp_path, {"RADARR_URL": "http://a", "RADARR_API_KEY": "k", "STALLED_ACTION": value})
+
+    assert cfg.watchers[-1].action is expected
+
+
+def test_ignore_tags_synthesizes_leading_watcher(tmp_path):
+    cfg = load(tmp_path, {
+        "RADARR_URL": "http://a", "RADARR_API_KEY": "k",
+        "QBITTORRENT_URL": "http://q",
+        "IGNORE_TORRENT_TAGS": " slow , ,manual",
+    })
+
+    ignore, default = cfg.watchers
+    assert ignore.name == "env-ignore-tags"
+    assert ignore.tags == ("slow", "manual")
+    assert ignore.action is Disposition.IGNORE
+    assert default.name == "env-default"
+
+
+def test_no_ignore_tags_means_single_watcher(tmp_path):
+    cfg = load(tmp_path, {"RADARR_URL": "http://a", "RADARR_API_KEY": "k"})
+
+    assert [w.name for w in cfg.watchers] == ["env-default"]
+
+
+YAML_ARR = """
+    version: 1
+    arrApps:
+      - type: sonarr
+        name: shows
+        url: sonarr.local:8989
+        apiKey: yamlkey
+        forceSearch: false
+"""
+
+
+def test_yaml_arr_apps_ignore_env(tmp_path):
+    cfg = load(tmp_path, dict(FULL_ENV), YAML_ARR)
+
+    app, = cfg.arr_apps
+    assert (app.type, app.name, app.url, app.api_key) == ("sonarr", "shows", "http://sonarr.local:8989", "yamlkey")
+    assert app.force_search is False
+    assert app.api_version == "v3"
+
+
+def test_yaml_scalars_win_env_fills_gaps(tmp_path):
+    cfg = load(tmp_path, dict(FULL_ENV), """
+        version: 1
+        runInterval: 10m
+        healthCheck:
+          enabled: false
+          port: 8080
+        dbFile: /data/x.db
+    """)
+
+    assert cfg.run_interval == 600
+    assert cfg.health_enabled is False
+    assert cfg.health_port == 8080
+    assert cfg.db_file == "/data/x.db"
+    # No log/countDownloadingMetadataAsStalled keys: env still applies.
+    assert cfg.verbose is True
+    assert cfg.count_metadata_as_stalled is True
+    # No arrApps/downloaders/watchers sections: env still applies.
+    assert [a.name for a in cfg.arr_apps] == ["Radarr0", "Radarr1", "Sonarr0"]
+    assert cfg.downloader is not None
+    assert cfg.watchers[-1].name == "env-default"
+
+
+def test_version_only_yaml_uses_env(tmp_path):
+    cfg = load(tmp_path, dict(FULL_ENV), "version: 1\n")
+
+    assert cfg.run_interval == 120
+    assert cfg.verbose is True
+    assert cfg.watchers[-1].stalled_timeout == 1800
+    assert [a.name for a in cfg.arr_apps] == ["Radarr0", "Radarr1", "Sonarr0"]
+
+
+def test_yaml_watchers_ignore_env_watcher_vars(tmp_path):
+    cfg = load(tmp_path, dict(FULL_ENV, IGNORE_TORRENT_TAGS="slow"), """
+        version: 1
+        watchers:
+          - name: protected
+            tags: [keep]
+            action: IGNORE
+          - name: fallback
+            stalledTimeout: 45m
+            action: KEEP
+    """)
+
+    protected, fallback = cfg.watchers
+    assert (protected.name, protected.tags, protected.action) == ("protected", ("keep",), Disposition.IGNORE)
+    assert (fallback.stalled_timeout, fallback.action) == (2700, Disposition.KEEP)
+
+
+def test_yaml_downloader_ignores_env(tmp_path):
+    cfg = load(tmp_path, dict(FULL_ENV), """
+        version: 1
+        downloaders:
+          - type: qbittorrent
+            name: box
+            url: yamlqbit:9999
+    """)
+
+    assert cfg.downloader == config.Downloader("box", "http://yamlqbit:9999", None, None)
+
+
+def test_yaml_verbose_overrides_env(tmp_path):
+    cfg = load(tmp_path, {"RADARR_URL": "http://a", "RADARR_API_KEY": "k", "VERBOSE": "true"}, """
+        version: 1
+        log:
+          verbose: false
+    """)
+
+    assert cfg.verbose is False
+
+
+def test_implicit_default_appended_when_last_watcher_tagged(tmp_path):
+    cfg = load(tmp_path, {"RADARR_URL": "http://a", "RADARR_API_KEY": "k"}, """
+        version: 1
+        watchers:
+          - name: protected
+            tags: [keep]
+            action: IGNORE
+    """)
+
+    assert [w.name for w in cfg.watchers] == ["protected", "implicit-default"]
+    implicit = cfg.watchers[-1]
+    assert implicit.tags == ()
+    assert implicit.stalled_timeout == 3600
+    assert implicit.action is Disposition.REMOVE_AND_BLOCKLIST_SEARCH
+
+
+def test_implicit_default_not_appended_when_catch_all_present(tmp_path):
+    cfg = load(tmp_path, {"RADARR_URL": "http://a", "RADARR_API_KEY": "k"}, """
+        version: 1
+        watchers:
+          - name: protected
+            tags: [keep]
+          - name: catch-all
+            action: IGNORE
+    """)
+
+    assert [w.name for w in cfg.watchers] == ["protected", "catch-all"]
+
+
+def test_config_file_env_var_resolves_path(tmp_path):
+    path = write_yaml(tmp_path, YAML_ARR, name="custom.yaml")
+    cfg = config.load_config(environ={"CONFIG_FILE": path})
+
+    assert [a.name for a in cfg.arr_apps] == ["shows"]
+
+
+def test_explicit_path_wins_over_config_file_env(tmp_path):
+    other = write_yaml(tmp_path, YAML_ARR, name="other.yaml")
+    cfg = config.load_config(other, environ={"CONFIG_FILE": str(tmp_path / "nope.yaml"),
+                                             "RADARR_URL": "http://a", "RADARR_API_KEY": "k"})
+
+    assert [a.name for a in cfg.arr_apps] == ["shows"]
+
+
+def assert_exits(caplog, *fragments, **kwargs):
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(SystemExit) as excinfo:
+            config.load_config(**kwargs)
+
+    assert excinfo.value.code == 1
+    errors = " | ".join(r.message for r in caplog.records if r.levelno == logging.ERROR)
+    for fragment in fragments:
+        assert fragment in errors, errors
+    return errors
+
+
+def test_url_key_mismatch_exits(tmp_path, caplog):
+    assert_exits(caplog, "RADARR_URL has 2 entries", "RADARR_API_KEY has 1",
+                 config_path=str(tmp_path / MISSING),
+                 environ={"RADARR_URL": "http://a,http://b", "RADARR_API_KEY": "k"})
+
+
+def test_url_without_key_exits(tmp_path, caplog):
+    assert_exits(caplog, "RADARR_URL", "RADARR_API_KEY",
+                 config_path=str(tmp_path / MISSING),
+                 environ={"RADARR_URL": "http://a"})
+
+
+def test_no_instances_exits(tmp_path, caplog):
+    assert_exits(caplog, "no *arr instances configured",
+                 config_path=str(tmp_path / MISSING), environ={})
+
+
+def test_invalid_stalled_action_exits(tmp_path, caplog):
+    assert_exits(caplog, "STALLED_ACTION", "EXPLODE",
+                 config_path=str(tmp_path / MISSING),
+                 environ={"RADARR_URL": "http://a", "RADARR_API_KEY": "k", "STALLED_ACTION": "EXPLODE"})
+
+
+def test_invalid_stalled_timeout_exits(tmp_path, caplog):
+    assert_exits(caplog, "STALLED_TIMEOUT", "5x",
+                 config_path=str(tmp_path / MISSING),
+                 environ={"RADARR_URL": "http://a", "RADARR_API_KEY": "k", "STALLED_TIMEOUT": "5x"})
+
+
+def test_invalid_run_interval_exits(tmp_path, caplog):
+    assert_exits(caplog, "RUN_INTERVAL", "0",
+                 config_path=str(tmp_path / MISSING),
+                 environ={"RADARR_URL": "http://a", "RADARR_API_KEY": "k", "RUN_INTERVAL": "0"})
+
+
+def test_invalid_yaml_exits(tmp_path, caplog):
+    assert_exits(caplog, "version",
+                 config_path=write_yaml(tmp_path, "version: 2\n"),
+                 environ={"RADARR_URL": "http://a", "RADARR_API_KEY": "k"})
+
+
+def test_multiple_env_problems_reported_together(tmp_path, caplog):
+    errors = assert_exits(caplog, "STALLED_ACTION", "no *arr instances configured",
+                          config_path=str(tmp_path / MISSING),
+                          environ={"STALLED_ACTION": "EXPLODE"})
+
+    assert errors.count("|") >= 1
+
+
+def test_empty_env_url_entry_exits(tmp_path, caplog):
+    assert_exits(caplog, "RADARR_URL entry 1",
+                 config_path=str(tmp_path / MISSING),
+                 environ={"RADARR_URL": "http://a, ", "RADARR_API_KEY": "k1,k2"})
+
+
+def test_warns_when_tags_without_downloader(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING):
+        load(tmp_path, {"RADARR_URL": "http://a", "RADARR_API_KEY": "k",
+                        "IGNORE_TORRENT_TAGS": "slow"})
+
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("no download client is configured" in message for message in warnings)
+
+
+def test_no_tag_warning_when_downloader_present(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING):
+        load(tmp_path, {"RADARR_URL": "http://a", "RADARR_API_KEY": "k",
+                        "QBITTORRENT_URL": "http://q", "IGNORE_TORRENT_TAGS": "slow"})
+
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_warns_change_category_with_lidarr(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING):
+        load(tmp_path, {"LIDARR_URL": "http://l", "LIDARR_API_KEY": "k"}, """
+            version: 1
+            watchers:
+              - name: recat
+                action: CHANGE_CATEGORY_AND_BLOCKLIST
+        """)
+
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("CHANGE_CATEGORY" in message for message in warnings)
+
+
+def test_no_change_category_warning_without_lidarr(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING):
+        load(tmp_path, {"RADARR_URL": "http://a", "RADARR_API_KEY": "k"}, """
+            version: 1
+            watchers:
+              - name: recat
+                action: CHANGE_CATEGORY
+        """)
+
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_config_source_logged(tmp_path, caplog):
+    with caplog.at_level(logging.INFO):
+        load(tmp_path, {"RADARR_URL": "http://a", "RADARR_API_KEY": "k"})
+    assert any("using environment variables only" in r.message for r in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        load(tmp_path, {}, YAML_ARR)
+    assert any("Loaded configuration from" in r.message for r in caplog.records)
+
+
+def test_app_config_is_frozen(tmp_path):
+    cfg = load(tmp_path, {"RADARR_URL": "http://a", "RADARR_API_KEY": "k"})
+
+    with pytest.raises(Exception):
+        cfg.run_interval = 5
+
+
+def test_yaml_count_metadata_overrides_env(tmp_path):
+    cfg = load(tmp_path, dict(FULL_ENV), """
+        version: 1
+        countDownloadingMetadataAsStalled: false
+    """)
+
+    assert cfg.count_metadata_as_stalled is False
+
+
+def test_defaults_to_os_environ(tmp_path, monkeypatch):
+    for var in ENV_VARS + ["CONFIG_FILE"]:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("RADARR_URL", "http://from-os-environ")
+    monkeypatch.setenv("RADARR_API_KEY", "k")
+
+    cfg = config.load_config(str(tmp_path / MISSING))
+
+    assert [a.url for a in cfg.arr_apps] == ["http://from-os-environ"]
