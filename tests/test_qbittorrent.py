@@ -1,3 +1,4 @@
+import pytest
 import requests
 import responses
 
@@ -101,9 +102,10 @@ def test_torrent_info_non_ok_returns_false(load_main):
     assert m.get_torrent_info_by_hash("ABC123HASH") is False
 
 
+@pytest.mark.parametrize("env", [{}, {"QBITTORRENT_URL": QBIT}])
 @responses.activate
-def test_should_ignore_without_qbit_config(load_main):
-    m = load_main({})
+def test_should_ignore_without_qbit_config(load_main, env):
+    m = load_main(env)
 
     assert m.should_ignore_download(queue_item()) is False
     assert len(responses.calls) == 0
