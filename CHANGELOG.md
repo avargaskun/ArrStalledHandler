@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/avargaskun/ArrStalledHandler/compare/v1.2.0...v1.2.1) (2026-07-26)
+
+
+### Bug Fixes
+
+* handle instance-suffixed service names and config/db crash paths ([bcdf4c6](https://github.com/avargaskun/ArrStalledHandler/commit/bcdf4c6d752d5d824842e244916a2972f3f8896a))
+
 ## [1.2.0](https://github.com/avargaskun/ArrStalledHandler/compare/v1.1.3...v1.2.0) (2026-07-25)
 
 
