@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import requests
+import config
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 import time
@@ -312,8 +313,12 @@ def detect_stuck_metadata_downloads(base_url, api_key, service_name, api_version
 
                 logging.debug(f"Download ID {download_id} first detected: {first_detected}, elapsed: {elapsed_time} seconds.")
                 if elapsed_time > STALLED_TIMEOUT:
+                    # TEMP bridge — removed in Phase 5
+                    bridged = _bridge_app_and_action(base_url, api_key, service_name)
+                    if bridged is None:
+                        continue
                     logging.info(f"Handling stuck metadata download ID {download_id} in {service_name} (elapsed time: {elapsed_time} seconds).")
-                    perform_action(base_url, headers, download_id, movie_id, service_name, api_version, episode_ids)
+                    perform_action(bridged[0], download_id, movie_id, episode_ids, bridged[1])
                     remove_stalled_download_from_db(download_id, service_name)
                 else:
                     logging.info(f"Metadata download ID {download_id} in {service_name} is within timeout period ({elapsed_time} seconds).")
@@ -365,48 +370,50 @@ def query_api_paginated(base_url, headers, params=None, page_size=50):
 
     return all_records
 
-def perform_action(base_url, headers, download_id, movie_id, service_name, api_version, episode_ids=None):
-    # Define action descriptions for logging
-    action_desc = {
-        "REMOVE": f"remove (ID: {download_id})",
-        "BLOCKLIST": f"blocklist (ID: {download_id})",
-        "BLOCKLIST_AND_SEARCH": f"blocklist and search (ID: {download_id}, {'Episodes' if service_name.startswith('Sonarr') else 'Movie'}: {episode_ids if service_name.startswith('Sonarr') else movie_id})"
-    }.get(STALLED_ACTION, "INVALID ACTION")
-
-    if STALLED_ACTION == "REMOVE":
-        action_url = f"{base_url}/api/{api_version}/queue/{download_id}"
-        logging.info(f"Performing action: {action_desc} in {service_name}...")
-        delete_api(action_url, headers)
-
-    elif STALLED_ACTION == "BLOCKLIST":
-        action_url = f"{base_url}/api/{api_version}/queue/{download_id}"
-        params = {"blocklist": "true", "skipRedownload": "true"}
-        logging.info(f"Performing action: {action_desc} in {service_name}...")
-        delete_api(action_url, headers, params)
-
-    elif STALLED_ACTION == "BLOCKLIST_AND_SEARCH":
-        # Blocklist the item but allow redownload
-        action_url = f"{base_url}/api/{api_version}/queue/{download_id}"
-        params = {"blocklist": "true", "skipRedownload": "false"}
-        logging.info(f"Performing action: {action_desc} in {service_name}...")
-        delete_api(action_url, headers, params)
-
-        # Trigger a search via the Command API
-        if service_name.startswith("Sonarr") and episode_ids:
-            command_url = f"{base_url}/api/{api_version}/command"
-            data = {"name": "EpisodeSearch", "episodeIds": episode_ids}
-            logging.info(f"Triggering search for Episodes {episode_ids} in {service_name} using Command API...")
-            post_api(command_url, headers, data)
-        elif service_name.startswith("Radarr") and movie_id:
-            command_url = f"{base_url}/api/{api_version}/command"
-            data = {"name": "MoviesSearch", "movieIds": [movie_id]}
-            logging.info(f"Triggering search for Movie ID {movie_id} in {service_name} using Command API...")
-            post_api(command_url, headers, data)
-        else:
-            logging.warning(f"No valid IDs found for download ID {download_id} in {service_name}, skipping search.")
-
-    else:
+# TEMP bridge — removed in Phase 5
+def _bridge_app_and_action(base_url, api_key, service_name):
+    """Build an ArrApp + disposition from the env globals; None when STALLED_ACTION is invalid."""
+    try:
+        action = config.QueueItemDisposition.parse(STALLED_ACTION)
+    except ValueError:
         logging.error(f"Invalid STALLED_ACTION: {STALLED_ACTION}")
+        return None
+    app = config.ArrApp(
+        type=service_name.rstrip("0123456789").lower(),
+        name=service_name,
+        url=base_url,
+        api_key=api_key,
+        force_search=True,
+    )
+    return app, action
+
+
+def perform_action(app, download_id, movie_id, episode_ids, action):
+    """Apply a QueueItemDisposition to a queue item, optionally triggering a re-search."""
+    if action is config.QueueItemDisposition.IGNORE:
+        raise ValueError("IGNORE items are skipped before reaching perform_action")
+
+    headers = {"X-Api-Key": app.api_key}
+    action_url = f"{app.url}/api/{app.api_version}/queue/{download_id}"
+    logging.info(f"Performing action: {action.name} (ID: {download_id}) in {app.name}...")
+    delete_api(action_url, headers, action.as_params())
+
+    if not action.triggers_search or not app.force_search:
+        return
+
+    command_url = f"{app.url}/api/{app.api_version}/command"
+    if app.type == "sonarr" and episode_ids:
+        data = {"name": "EpisodeSearch", "episodeIds": episode_ids}
+        logging.info(f"Triggering search for Episodes {episode_ids} in {app.name} using Command API...")
+        post_api(command_url, headers, data)
+    elif app.type == "radarr" and movie_id:
+        data = {"name": "MoviesSearch", "movieIds": [movie_id]}
+        logging.info(f"Triggering search for Movie ID {movie_id} in {app.name} using Command API...")
+        post_api(command_url, headers, data)
+    elif app.type in ("lidarr", "readarr"):
+        logging.debug(f"Explicit search is not supported for {app.type}; skipping search for download ID {download_id}.")
+    else:
+        logging.warning(f"No valid IDs found for download ID {download_id} in {app.name}, skipping search.")
 
 def handle_stalled_downloads(base_url, api_key, service_name, api_version):
     """
@@ -447,8 +454,12 @@ def handle_stalled_downloads(base_url, api_key, service_name, api_version):
 
                 logging.debug(f"Download ID {download_id} first detected: {first_detected}, elapsed: {elapsed_time} seconds.")
                 if elapsed_time > STALLED_TIMEOUT:
+                    # TEMP bridge — removed in Phase 5
+                    bridged = _bridge_app_and_action(base_url, api_key, service_name)
+                    if bridged is None:
+                        continue
                     logging.info(f"Handling stalled Download ID {download_id} in {service_name} (elapsed time: {elapsed_time} seconds).")
-                    perform_action(base_url, headers, download_id, movie_id, service_name, api_version, episode_ids)
+                    perform_action(bridged[0], download_id, movie_id, episode_ids, bridged[1])
                     remove_stalled_download_from_db(download_id, service_name)
                 else:
                     logging.info(f"Download ID {download_id} in {service_name} is stalled but within timeout period ({elapsed_time} seconds).")

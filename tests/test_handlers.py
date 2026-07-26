@@ -61,7 +61,8 @@ def test_past_timeout_acted_and_row_removed(load_main):
 
     m.handle_stalled_downloads(RADARR, "key", "Radarr0", "v3")
 
-    assert query("DELETE") == {"blocklist": ["true"], "skipRedownload": ["true"]}
+    assert query("DELETE") == {"removeFromClient": ["true"], "changeCategory": ["false"],
+                               "blocklist": ["true"], "skipRedownload": ["true"]}
     assert m.get_stalled_downloads_from_db("Radarr0") == {}
 
 
@@ -174,7 +175,8 @@ def test_metadata_enabled_full_flow(load_main):
     m.add_stalled_download_to_db("1", ago(3700), "Radarr0")
     m.detect_stuck_metadata_downloads(RADARR, "key", "Radarr0", "v3")
 
-    assert query("DELETE") == {"blocklist": ["true"], "skipRedownload": ["true"]}
+    assert query("DELETE") == {"removeFromClient": ["true"], "changeCategory": ["false"],
+                               "blocklist": ["true"], "skipRedownload": ["true"]}
     assert m.get_stalled_downloads_from_db("Radarr0") == {}
 
 
