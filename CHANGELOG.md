@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.2](https://github.com/avargaskun/ArrStalledHandler/compare/v1.2.1...v1.2.2) (2026-07-26)
+
+
+### Bug Fixes
+
+* send the health server's 404 response ([cfb630d](https://github.com/avargaskun/ArrStalledHandler/commit/cfb630d16d656b91182740f4cd652b9086583854))
+
 ## [1.2.1](https://github.com/avargaskun/ArrStalledHandler/compare/v1.2.0...v1.2.1) (2026-07-26)
 
 
