@@ -112,7 +112,7 @@ def remove_stalled_download_from_db(download_id, arr_service):
     cursor = conn.cursor()
 
     # Delete the record for the specific service
-    cursor.execute("DELETE FROM stalled_downloads WHERE download_id = ? AND arr_service = ?", (download_id, arr_service))
+    cursor.execute("DELETE FROM stalled_downloads WHERE download_id = ? AND arr_service = ?", (str(download_id), arr_service))
 
     conn.commit()
     conn.close()
@@ -454,6 +454,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.wfile.write(b'OK')
         else:
             self.send_response(404)
+            self.end_headers()
     
     # Silence console logs for health checks to keep logs clean
     def log_message(self, format, *args):

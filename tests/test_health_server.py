@@ -1,7 +1,6 @@
 import threading
 import time
 
-import pytest
 import requests
 
 BASE_URL = "http://127.0.0.1:9898"
@@ -34,10 +33,10 @@ def test_ping_returns_200_ok(load_main):
     assert response.text == "OK"
 
 
-def test_other_path_404_never_reaches_the_client(load_main):
+def test_other_path_404(load_main):
     m = load_main({})
     _ensure_server(m)
 
-    # Known quirk: the 404 branch never calls end_headers(), so zero bytes are sent.
-    with pytest.raises(requests.exceptions.ConnectionError):
-        requests.get(f"{BASE_URL}/anything-else", timeout=1)
+    response = requests.get(f"{BASE_URL}/anything-else", timeout=1)
+
+    assert response.status_code == 404

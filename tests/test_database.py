@@ -64,3 +64,13 @@ def test_remove_deletes_only_matching_service(load_main):
 
     assert m.get_stalled_downloads_from_db("Radarr0") == {}
     assert m.get_stalled_downloads_from_db("Sonarr0") == {"7": now}
+
+
+def test_add_and_remove_accept_int_download_id(load_main):
+    m = load_main({})
+    m.initialize_database()
+
+    m.add_stalled_download_to_db(7, datetime.now(timezone.utc), "Radarr0")
+    m.remove_stalled_download_from_db(7, "Radarr0")
+
+    assert m.get_stalled_downloads_from_db("Radarr0") == {}
