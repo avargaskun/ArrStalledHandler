@@ -1,7 +1,15 @@
+import textwrap
+
 import pytest
 
 import config
 from config import QueueItemDisposition as Disposition
+
+
+def write_yaml(tmp_path, text, name="config.yaml"):
+    path = tmp_path / name
+    path.write_text(textwrap.dedent(text))
+    return str(path)
 
 
 def test_service_urls_comma_split(load_main):
@@ -180,3 +188,296 @@ def test_disposition_parse_rejects_unknown(value):
         Disposition.parse(value)
 
     assert repr(value) in str(excinfo.value)
+
+
+FULL_YAML = """
+    version: 1
+
+    runInterval: 5m
+    log:
+      verbose: true
+    healthCheck:
+      enabled: false
+      port: 8080
+    dbFile: /data/stalled.db
+    countDownloadingMetadataAsStalled: true
+
+    arrApps:
+      - type: radarr
+        name: anime
+        url: localhost:7878
+        apiKey: xxxyyyzzz
+        forceSearch: false
+      - type: sonarr
+        name: shows
+        url: https://sonarr.example.com
+        apiKey: aaabbbccc
+
+    downloaders:
+      - type: qbittorrent
+        name: default
+        url: localhost:9999
+        username: admin
+        password: abcd
+
+    watchers:
+      - name: seeding-protection
+        tags: [keep, private]
+        stalledTimeout: 1h
+        action: IGNORE
+      - name: catch-all
+        action: blocklist_and_search
+"""
+
+
+def test_full_config_parses(tmp_path):
+    model = config._load_yaml_model(write_yaml(tmp_path, FULL_YAML))
+
+    assert model.version == 1
+    assert model.runInterval == 300
+    assert model.log.verbose is True
+    assert model.healthCheck.enabled is False
+    assert model.healthCheck.port == 8080
+    assert model.dbFile == "/data/stalled.db"
+    assert model.countDownloadingMetadataAsStalled is True
+
+    radarr, sonarr = model.arrApps
+    assert (radarr.type, radarr.name, radarr.apiKey) == ("radarr", "anime", "xxxyyyzzz")
+    assert radarr.url == "http://localhost:7878"
+    assert radarr.forceSearch is False
+    assert sonarr.url == "https://sonarr.example.com"
+    assert sonarr.forceSearch is True
+
+    downloader, = model.downloaders
+    assert (downloader.type, downloader.name) == ("qbittorrent", "default")
+    assert downloader.url == "http://localhost:9999"
+    assert (downloader.username, downloader.password) == ("admin", "abcd")
+
+    protection, catch_all = model.watchers
+    assert protection.tags == ["keep", "private"]
+    assert protection.stalledTimeout == 3600
+    assert protection.action is Disposition.IGNORE
+    assert catch_all.tags == []
+    assert catch_all.stalledTimeout == 3600
+    assert catch_all.action is Disposition.REMOVE_AND_BLOCKLIST_SEARCH
+
+
+def test_minimal_config_leaves_sections_absent(tmp_path):
+    model = config._load_yaml_model(write_yaml(tmp_path, "version: 1\n"))
+
+    assert model.arrApps is None
+    assert model.downloaders is None
+    assert model.watchers is None
+    assert model.log is None
+    assert model.healthCheck is None
+    assert model.dbFile is None
+    assert model.runInterval is None
+    assert model.countDownloadingMetadataAsStalled is None
+
+
+def test_missing_file_returns_none(tmp_path):
+    assert config._load_yaml_model(str(tmp_path / "nope.yaml")) is None
+
+
+def test_healthcheck_defaults(tmp_path):
+    model = config._load_yaml_model(write_yaml(tmp_path, """
+        version: 1
+        healthCheck: {}
+    """))
+
+    assert model.healthCheck.enabled is True
+    assert model.healthCheck.port == 9898
+
+
+def test_run_interval_accepts_bare_seconds(tmp_path):
+    model = config._load_yaml_model(write_yaml(tmp_path, "version: 1\nrunInterval: 90\n"))
+
+    assert model.runInterval == 90
+
+
+def assert_config_error(tmp_path, text, *expected_fragments):
+    with pytest.raises(config.ConfigError) as excinfo:
+        config._load_yaml_model(write_yaml(tmp_path, text))
+
+    joined = " | ".join(excinfo.value.messages)
+    for fragment in expected_fragments:
+        assert fragment in joined, joined
+    return excinfo.value
+
+
+def test_malformed_yaml(tmp_path):
+    assert_config_error(tmp_path, "version: 1\n  bad: [unclosed\n", "invalid YAML")
+
+
+def test_non_mapping_root(tmp_path):
+    assert_config_error(tmp_path, "- version: 1\n", "mapping")
+
+
+def test_empty_file_is_error(tmp_path):
+    assert_config_error(tmp_path, "", "mapping")
+
+
+def test_wrong_version(tmp_path):
+    assert_config_error(tmp_path, "version: 2\n", "version", "only version 1")
+
+
+def test_missing_version(tmp_path):
+    assert_config_error(tmp_path, "dbFile: x.db\n", "version")
+
+
+def test_unknown_root_key(tmp_path):
+    assert_config_error(tmp_path, "version: 1\nbogus: 3\n", "bogus")
+
+
+def test_unknown_nested_key(tmp_path):
+    assert_config_error(tmp_path, """
+        version: 1
+        arrApps:
+          - type: radarr
+            name: a
+            url: http://a
+            apiKey: k
+            bogus: 1
+    """, "arrApps.0.bogus")
+
+
+def test_missing_name(tmp_path):
+    assert_config_error(tmp_path, """
+        version: 1
+        arrApps:
+          - type: radarr
+            url: http://a
+            apiKey: k
+    """, "arrApps.0.name")
+
+
+def test_empty_name(tmp_path):
+    assert_config_error(tmp_path, """
+        version: 1
+        watchers:
+          - name: "  "
+    """, "watchers.0.name")
+
+
+def test_missing_api_key(tmp_path):
+    assert_config_error(tmp_path, """
+        version: 1
+        arrApps:
+          - type: radarr
+            name: a
+            url: http://a
+    """, "arrApps.0.apiKey")
+
+
+def test_bad_arr_type(tmp_path):
+    assert_config_error(tmp_path, """
+        version: 1
+        arrApps:
+          - type: plexarr
+            name: a
+            url: http://a
+            apiKey: k
+    """, "arrApps.0.type")
+
+
+def test_empty_url(tmp_path):
+    assert_config_error(tmp_path, """
+        version: 1
+        arrApps:
+          - type: radarr
+            name: a
+            url: ""
+            apiKey: k
+    """, "arrApps.0.url")
+
+
+def test_duplicate_watcher_names(tmp_path):
+    assert_config_error(tmp_path, """
+        version: 1
+        watchers:
+          - name: dup
+          - name: dup
+    """, "watchers", "dup")
+
+
+def test_duplicate_arr_app_names(tmp_path):
+    assert_config_error(tmp_path, """
+        version: 1
+        arrApps:
+          - type: radarr
+            name: same
+            url: http://a
+            apiKey: k
+          - type: sonarr
+            name: same
+            url: http://b
+            apiKey: k
+    """, "arrApps", "same")
+
+
+def test_empty_arr_apps_section(tmp_path):
+    assert_config_error(tmp_path, "version: 1\narrApps: []\n", "arrApps", "empty")
+
+
+def test_empty_watchers_section(tmp_path):
+    assert_config_error(tmp_path, "version: 1\nwatchers: []\n", "watchers", "empty")
+
+
+def test_two_downloaders(tmp_path):
+    assert_config_error(tmp_path, """
+        version: 1
+        downloaders:
+          - type: qbittorrent
+            name: one
+            url: http://a
+          - type: qbittorrent
+            name: two
+            url: http://b
+    """, "downloaders", "one entry")
+
+
+def test_bad_action(tmp_path):
+    assert_config_error(tmp_path, """
+        version: 1
+        watchers:
+          - name: w
+            action: EXPLODE
+    """, "watchers.0.action", "EXPLODE")
+
+
+def test_bad_duration(tmp_path):
+    assert_config_error(tmp_path, """
+        version: 1
+        watchers:
+          - name: w
+            stalledTimeout: 5x
+    """, "watchers.0.stalledTimeout", "5x")
+
+
+def test_bad_run_interval(tmp_path):
+    assert_config_error(tmp_path, "version: 1\nrunInterval: -3\n", "runInterval")
+
+
+def test_multiple_errors_reported(tmp_path):
+    error = assert_config_error(tmp_path, """
+        version: 2
+        bogus: true
+    """, "version", "bogus")
+
+    assert len(error.messages) == 2
+
+
+def test_explicit_null_run_interval_stays_none(tmp_path):
+    model = config._load_yaml_model(write_yaml(tmp_path, "version: 1\nrunInterval:\n"))
+
+    assert model.runInterval is None
+
+
+def test_unreadable_path_is_error(tmp_path):
+    directory = tmp_path / "config.yaml"
+    directory.mkdir()
+
+    with pytest.raises(config.ConfigError) as excinfo:
+        config._load_yaml_model(str(directory))
+
+    assert "could not be read" in excinfo.value.messages[0]

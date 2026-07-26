@@ -1,7 +1,12 @@
 """Configuration loading, validation and runtime config types."""
 
+import os
 import re
 from enum import Enum
+from typing import Literal, Optional
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 _DIGITS_RE = re.compile(r"^[0-9]+$")
 _DURATION_RE = re.compile(r"^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
@@ -76,3 +81,163 @@ class QueueItemDisposition(Enum):
         except KeyError:
             valid = ", ".join(member.name for member in cls)
             raise ValueError(f"Invalid action: {value!r} (valid values: {valid})") from None
+
+
+class ConfigError(Exception):
+    """Carries every configuration problem found, one message per entry."""
+
+    def __init__(self, messages):
+        if isinstance(messages, str):
+            messages = [messages]
+        self.messages = list(messages)
+        super().__init__("; ".join(self.messages))
+
+
+def _normalize_name(value):
+    name = value.strip()
+    if not name:
+        raise ValueError("must not be empty")
+    return name
+
+
+def _normalize_url(value):
+    url = value.strip()
+    if not url:
+        raise ValueError("must not be empty")
+    if "://" not in url:
+        url = f"http://{url}"
+    return url
+
+
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class LogModel(_StrictModel):
+    verbose: Optional[bool] = None
+
+
+class HealthCheckModel(_StrictModel):
+    enabled: bool = True
+    port: int = 9898
+
+
+class ArrAppModel(_StrictModel):
+    type: Literal["radarr", "sonarr", "lidarr", "readarr"]
+    name: str
+    url: str
+    apiKey: str
+    forceSearch: bool = True
+
+    _check_name = field_validator("name")(_normalize_name)
+    _check_url = field_validator("url")(_normalize_url)
+
+
+class DownloaderModel(_StrictModel):
+    type: Literal["qbittorrent"]
+    name: str
+    url: str
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+    _check_name = field_validator("name")(_normalize_name)
+    _check_url = field_validator("url")(_normalize_url)
+
+
+class WatcherModel(_StrictModel):
+    name: str
+    tags: list[str] = Field(default_factory=list)
+    stalledTimeout: int = 3600
+    action: QueueItemDisposition = QueueItemDisposition.REMOVE_AND_BLOCKLIST_SEARCH
+
+    _check_name = field_validator("name")(_normalize_name)
+
+    @field_validator("stalledTimeout", mode="before")
+    @classmethod
+    def _parse_timeout(cls, value):
+        return parse_duration(value)
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def _parse_action(cls, value):
+        return QueueItemDisposition.parse(value)
+
+
+class YamlConfigModel(_StrictModel):
+    version: int
+    runInterval: Optional[int] = None
+    log: Optional[LogModel] = None
+    healthCheck: Optional[HealthCheckModel] = None
+    dbFile: Optional[str] = None
+    countDownloadingMetadataAsStalled: Optional[bool] = None
+    arrApps: Optional[list[ArrAppModel]] = None
+    downloaders: Optional[list[DownloaderModel]] = None
+    watchers: Optional[list[WatcherModel]] = None
+
+    @field_validator("version")
+    @classmethod
+    def _check_version(cls, value):
+        if value != 1:
+            raise ValueError(f"unsupported config version {value} (only version 1 is supported)")
+        return value
+
+    @field_validator("runInterval", mode="before")
+    @classmethod
+    def _parse_run_interval(cls, value):
+        if value is None:
+            return None
+        return parse_duration(value)
+
+    @model_validator(mode="after")
+    def _check_sections(self):
+        problems = []
+        for section in ("arrApps", "downloaders", "watchers"):
+            entries = getattr(self, section)
+            if entries is None:
+                continue
+            if not entries:
+                problems.append(f"{section} is present but empty")
+                continue
+            seen = set()
+            for entry in entries:
+                if entry.name in seen:
+                    problems.append(f"{section} has a duplicate name {entry.name!r}")
+                seen.add(entry.name)
+        # Schema is a list for forward compatibility; only one downloader is supported today.
+        # Future: match queue items to downloaders via the *arr item's downloadClient name.
+        if self.downloaders and len(self.downloaders) > 1:
+            problems.append("downloaders supports exactly one entry today")
+        if problems:
+            raise ValueError("; ".join(problems))
+        return self
+
+
+def _format_validation_errors(error):
+    messages = []
+    for entry in error.errors():
+        location = ".".join(str(part) for part in entry["loc"])
+        message = entry["msg"]
+        messages.append(f"{location}: {message}" if location else message)
+    return messages
+
+
+def _load_yaml_model(path):
+    """Parse and validate a YAML config file. Returns None when the file does not exist."""
+    if not os.path.exists(path):
+        return None
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle)
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"{path}: invalid YAML ({exc})") from None
+    except OSError as exc:
+        raise ConfigError(f"{path}: could not be read ({exc})") from None
+
+    if not isinstance(data, dict):
+        raise ConfigError(f"{path}: expected a mapping at the top level")
+
+    try:
+        return YamlConfigModel.model_validate(data)
+    except ValidationError as exc:
+        raise ConfigError(_format_validation_errors(exc)) from None
