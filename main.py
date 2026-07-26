@@ -12,39 +12,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # Load environment variables
 load_dotenv()
 
-# Configuration from .env
-def load_service_config(prefix):
-    """Return (urls, api_keys) for a service, or (None, None) if unconfigured."""
-    urls = os.getenv(f"{prefix}_URL")
-    if not urls:  # unset OR empty — README: "leave the URL empty" disables the service
-        return None, None
-    keys = os.getenv(f"{prefix}_API_KEY")
-    urls = urls.split(",")
-    keys = keys.split(",") if keys else []
-    if len(keys) != len(urls):
-        raise SystemExit(
-            f"{prefix}_URL has {len(urls)} entries but {prefix}_API_KEY has {len(keys)}; "
-            f"each URL needs a matching API key"
-        )
-    return urls, keys
-
-RADARR_URL, RADARR_API_KEY = load_service_config("RADARR")
-SONARR_URL, SONARR_API_KEY = load_service_config("SONARR")
-LIDARR_URL, LIDARR_API_KEY = load_service_config("LIDARR")
-READARR_URL, READARR_API_KEY = load_service_config("READARR")
-
-# qBittorrent configuration
-QBITTORRENT_URL = os.getenv("QBITTORRENT_URL")
-QBITTORRENT_USERNAME = os.getenv("QBITTORRENT_USERNAME")
-QBITTORRENT_PASSWORD = os.getenv("QBITTORRENT_PASSWORD")
-IGNORE_TORRENT_TAGS = os.getenv("IGNORE_TORRENT_TAGS", "").split(",") if os.getenv("IGNORE_TORRENT_TAGS") else []
-IGNORE_TORRENT_TAGS = [tag.strip() for tag in IGNORE_TORRENT_TAGS if tag.strip()]  # Clean up tags
-
-STALLED_TIMEOUT = int(os.getenv("STALLED_TIMEOUT") or 3600)
-STALLED_ACTION = (os.getenv("STALLED_ACTION") or "BLOCKLIST_AND_SEARCH").upper()
 VERBOSE = os.getenv("VERBOSE", "false").lower() == "true"
 RUN_INTERVAL = int(os.getenv("RUN_INTERVAL") or 300)  # Default to 300 seconds
-COUNT_DOWNLOADING_METADATA_AS_STALLED = os.getenv("COUNT_DOWNLOADING_METADATA_AS_STALLED", "false").lower() == "true"
 
 DB_FILE = "stalled_downloads.db"
 
@@ -228,104 +197,91 @@ class QbitClient:
             logging.error(f"Error getting torrent info from qBittorrent: {e}")
             return None
 
-# TEMP bridge — removed in Phase 5
-_qbit_client = None
+SKIP_ITEM = object()
 
-def should_ignore_download(item):
-    """Check if a download should be ignored based on torrent tags."""
-    global _qbit_client  # TEMP bridge — removed in Phase 5
+def match_watcher(item, watchers, qbit):
+    """Return the first watcher matching the queue item, or SKIP_ITEM when tags can't be resolved."""
+    item_tags = None
 
-    if not QBITTORRENT_URL or not IGNORE_TORRENT_TAGS:
-        return False
+    for watcher in watchers:
+        if not watcher.tags:
+            return watcher
 
-    # Get the download client info
-    download_client = item.get('downloadClient', '').lower()
-    if 'qbittorrent' not in download_client:
-        logging.debug(f"Download client '{download_client}' is not qBittorrent, not checking tags")
-        return False
+        if qbit is None or 'qbittorrent' not in item.get('downloadClient', '').lower():
+            continue  # tagged watchers can never match an item we cannot look up
 
-    # Get the info hash from the download
-    download_id = item.get('downloadId')
-    if not download_id:
-        logging.debug("No downloadId found in queue item")
-        return False
+        if item_tags is None:
+            item_tags = qbit.get_tags(item.get('downloadId'))
+            if item_tags is None:
+                logging.warning(
+                    f"Could not get torrent tags for '{item.get('title')}' "
+                    f"(hash: {item.get('downloadId')}); skipping it this cycle."
+                )
+                return SKIP_ITEM
 
-    if _qbit_client is None:  # TEMP bridge — removed in Phase 5
-        _qbit_client = QbitClient(QBITTORRENT_URL, QBITTORRENT_USERNAME, QBITTORRENT_PASSWORD)
+        if {tag.lower() for tag in watcher.tags} & {tag.lower() for tag in item_tags}:
+            return watcher
 
-    # The downloadId from *arr apps is typically the torrent hash
-    torrent_tags = _qbit_client.get_tags(download_id)
-    if torrent_tags is None:
-        logging.warning(f"Could not get torrent info for hash: {download_id}")
-        return False
+    return SKIP_ITEM
 
-    # Check if any of the torrent's tags match our ignore list
-    for tag in torrent_tags:
-        if tag in IGNORE_TORRENT_TAGS:
-            logging.info(f"Ignoring download '{item.get('title')}' due to torrent tag: {tag}")
-            return True
+def _process_queue_item(cfg, app, qbit, item, tracked):
+    """Apply the matching watcher's policy to one queue item."""
+    download_id = str(item["id"])
+    movie_id = item.get("movieId") if app.type == "radarr" else None
+    episode_ids = [item["episodeId"]] if app.type == "sonarr" and "episodeId" in item else None
 
-    return False
+    watcher = match_watcher(item, cfg.watchers, qbit)
+    if watcher is SKIP_ITEM:
+        return
 
-def detect_stuck_metadata_downloads(base_url, api_key, service_name, api_version):
-    """
-    Detect downloads stuck at 'Downloading Metadata' and apply timeout logic.
-    Controlled by COUNT_DOWNLOADING_METADATA_AS_STALLED environment variable.
-    """
-    count_metadata_as_stalled = os.getenv("COUNT_DOWNLOADING_METADATA_AS_STALLED", "false").lower() == "true"
-    if not count_metadata_as_stalled:
-        logging.debug(f"Skipping 'Downloading Metadata' detection for {service_name} (disabled).")
+    if watcher.action is config.QueueItemDisposition.IGNORE:
+        logging.debug(
+            f"Ignoring download ID {download_id} in {app.name} (watcher '{watcher.name}')."
+        )
+        return
+
+    if download_id in tracked:
+        first_detected = tracked[download_id]
+        elapsed_time = (datetime.now(timezone.utc) - first_detected).total_seconds()
+
+        logging.debug(f"Download ID {download_id} first detected: {first_detected}, elapsed: {elapsed_time} seconds.")
+        if elapsed_time > watcher.stalled_timeout:
+            logging.info(f"Handling stalled Download ID {download_id} in {app.name} (elapsed time: {elapsed_time} seconds).")
+            perform_action(app, download_id, movie_id, episode_ids, watcher.action)
+            remove_stalled_download_from_db(download_id, app.name, db_file=cfg.db_file)
+        else:
+            logging.info(f"Download ID {download_id} in {app.name} is within timeout period ({elapsed_time} seconds).")
+    else:
+        add_stalled_download_to_db(download_id, datetime.now(timezone.utc), app.name, db_file=cfg.db_file)
+        logging.info(f"Adding stalled download ID {download_id} in {app.name} to the database.")
+
+def detect_stuck_metadata_downloads(cfg, app, qbit):
+    """Detect downloads stuck at 'Downloading Metadata' and apply the watcher timeout logic."""
+    if not cfg.count_metadata_as_stalled:
+        logging.debug(f"Skipping 'Downloading Metadata' detection for {app.name} (disabled).")
         return
 
     # Query parameters for metadata detection
     params = {
         "protocol": "torrent",
         "status": "queued",  # Only look for queued downloads
-        "includeEpisode": "true" if service_name.startswith("Sonarr") else "false"
+        "includeEpisode": "true" if app.type == "sonarr" else "false"
     }
 
-    logging.info(f"Checking for stuck downloads ('Downloading Metadata') in {service_name}...")
-    headers = {"X-Api-Key": api_key}
-    queue_url = f"{base_url}/api/{api_version}/queue"
+    logging.info(f"Checking for stuck downloads ('Downloading Metadata') in {app.name}...")
+    headers = {"X-Api-Key": app.api_key}
+    queue_url = f"{app.url}/api/{app.api_version}/queue"
     metadata_records = query_api_paginated(queue_url, headers, params, page_size=50)
 
     if not metadata_records:
-        logging.info(f"No stuck downloads detected in {service_name}.")
+        logging.info(f"No stuck downloads detected in {app.name}.")
         return
 
-    # Get metadata downloads already detected and stored in the database
-    detected_metadata_downloads = get_stalled_downloads_from_db(service_name)
+    tracked = get_stalled_downloads_from_db(app.name, db_file=cfg.db_file)
 
     for item in metadata_records:
         if item.get("errorMessage", "").lower() == "qbittorrent is downloading metadata":
-            # Check if this download should be ignored
-            if should_ignore_download(item):
-                continue
-                
-            download_id = str(item["id"])
-            movie_id = item.get("movieId") if service_name.startswith("Radarr") else None
-            episode_ids = [item["episodeId"]] if service_name.startswith("Sonarr") and "episodeId" in item else None
-
-            # Check if this download ID is already tracked in the database
-            if download_id in detected_metadata_downloads:
-                first_detected = detected_metadata_downloads[download_id]
-                elapsed_time = (datetime.now(timezone.utc) - first_detected).total_seconds()
-
-                logging.debug(f"Download ID {download_id} first detected: {first_detected}, elapsed: {elapsed_time} seconds.")
-                if elapsed_time > STALLED_TIMEOUT:
-                    # TEMP bridge — removed in Phase 5
-                    bridged = _bridge_app_and_action(base_url, api_key, service_name)
-                    if bridged is None:
-                        continue
-                    logging.info(f"Handling stuck metadata download ID {download_id} in {service_name} (elapsed time: {elapsed_time} seconds).")
-                    perform_action(bridged[0], download_id, movie_id, episode_ids, bridged[1])
-                    remove_stalled_download_from_db(download_id, service_name)
-                else:
-                    logging.info(f"Metadata download ID {download_id} in {service_name} is within timeout period ({elapsed_time} seconds).")
-            else:
-                # Add this metadata download to the database with the current timestamp
-                add_stalled_download_to_db(download_id, datetime.now(timezone.utc), service_name)
-                logging.info(f"Added metadata download ID {download_id} in {service_name} to the database.")
+            _process_queue_item(cfg, app, qbit, item, tracked)
 
 def query_api_paginated(base_url, headers, params=None, page_size=50):
     """Query an API endpoint with pagination to retrieve all records."""
@@ -370,24 +326,6 @@ def query_api_paginated(base_url, headers, params=None, page_size=50):
 
     return all_records
 
-# TEMP bridge — removed in Phase 5
-def _bridge_app_and_action(base_url, api_key, service_name):
-    """Build an ArrApp + disposition from the env globals; None when STALLED_ACTION is invalid."""
-    try:
-        action = config.QueueItemDisposition.parse(STALLED_ACTION)
-    except ValueError:
-        logging.error(f"Invalid STALLED_ACTION: {STALLED_ACTION}")
-        return None
-    app = config.ArrApp(
-        type=service_name.rstrip("0123456789").lower(),
-        name=service_name,
-        url=base_url,
-        api_key=api_key,
-        force_search=True,
-    )
-    return app, action
-
-
 def perform_action(app, download_id, movie_id, episode_ids, action):
     """Apply a QueueItemDisposition to a queue item, optionally triggering a re-search."""
     if action is config.QueueItemDisposition.IGNORE:
@@ -415,57 +353,31 @@ def perform_action(app, download_id, movie_id, episode_ids, action):
     else:
         logging.warning(f"No valid IDs found for download ID {download_id} in {app.name}, skipping search.")
 
-def handle_stalled_downloads(base_url, api_key, service_name, api_version):
+def handle_stalled_downloads(cfg, app, qbit):
     """
     Handle downloads that are stalled (status=warning).
     """
-    logging.info(f"Checking stalled downloads in {service_name}...")
+    logging.info(f"Checking stalled downloads in {app.name}...")
 
     # Query parameters for stalled detection
     params = {
         "protocol": "torrent",
         "status": "warning",  # Only look for stalled downloads
-        "includeEpisode": "true" if service_name.startswith("Sonarr") else "false"
+        "includeEpisode": "true" if app.type == "sonarr" else "false"
     }
 
-    headers = {"X-Api-Key": api_key}
-    queue_url = f"{base_url}/api/{api_version}/queue"
+    headers = {"X-Api-Key": app.api_key}
+    queue_url = f"{app.url}/api/{app.api_version}/queue"
     queue_records = query_api_paginated(queue_url, headers, params, page_size=50)
 
     if not queue_records:
-        logging.info(f"No stalled downloads found in {service_name}.")
+        logging.info(f"No stalled downloads found in {app.name}.")
         return
 
-    # Existing logic for handling stalled downloads
-    stalled_downloads = get_stalled_downloads_from_db(service_name)
+    tracked = get_stalled_downloads_from_db(app.name, db_file=cfg.db_file)
     for item in queue_records:
         if item.get("errorMessage", "").lower() == "the download is stalled with no connections":
-            # Check if this download should be ignored
-            if should_ignore_download(item):
-                continue
-
-            download_id = str(item["id"])
-            movie_id = item.get("movieId") if service_name.startswith("Radarr") else None
-            episode_ids = [item["episodeId"]] if service_name.startswith("Sonarr") and "episodeId" in item else None
-
-            if download_id in stalled_downloads:
-                first_detected = stalled_downloads[download_id]
-                elapsed_time = (datetime.now(timezone.utc) - first_detected).total_seconds()
-
-                logging.debug(f"Download ID {download_id} first detected: {first_detected}, elapsed: {elapsed_time} seconds.")
-                if elapsed_time > STALLED_TIMEOUT:
-                    # TEMP bridge — removed in Phase 5
-                    bridged = _bridge_app_and_action(base_url, api_key, service_name)
-                    if bridged is None:
-                        continue
-                    logging.info(f"Handling stalled Download ID {download_id} in {service_name} (elapsed time: {elapsed_time} seconds).")
-                    perform_action(bridged[0], download_id, movie_id, episode_ids, bridged[1])
-                    remove_stalled_download_from_db(download_id, service_name)
-                else:
-                    logging.info(f"Download ID {download_id} in {service_name} is stalled but within timeout period ({elapsed_time} seconds).")
-            else:
-                add_stalled_download_to_db(download_id, datetime.now(timezone.utc), service_name)
-                logging.info(f"Adding stalled download ID {download_id} in {service_name} to the database.")
+            _process_queue_item(cfg, app, qbit, item, tracked)
 
 # --- Health Check Server Logic ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -496,33 +408,22 @@ if __name__ == "__main__":
     # Start the health check server in a background thread
     health_thread = threading.Thread(target=start_health_server, daemon=True)
     health_thread.start()
+
+    cfg = config.load_config()
+    initialize_database(cfg.db_file)
+    prune_orphaned_services(cfg.db_file, [app.name for app in cfg.arr_apps])
+    qbit = QbitClient(
+        cfg.downloader.url, cfg.downloader.username, cfg.downloader.password
+    ) if cfg.downloader else None
+
     try:
         while True:
-            initialize_database()
+            for app in cfg.arr_apps:
+                handle_stalled_downloads(cfg, app, qbit)
+                detect_stuck_metadata_downloads(cfg, app, qbit)
 
-            #itterate through env variables for services
-            if RADARR_URL is not None:
-                for radarrCount in range(len(RADARR_URL)):
-                    handle_stalled_downloads(RADARR_URL[radarrCount], RADARR_API_KEY[radarrCount], "Radarr"+str(radarrCount), "v3")  # Handle regular stalled downloads
-                    detect_stuck_metadata_downloads(RADARR_URL[radarrCount], RADARR_API_KEY[radarrCount], "Radarr"+str(radarrCount), "v3")  # Detect stuck downloads at "Downloading Metadata"
-
-            if SONARR_URL is not None:
-                for sonarrCount in range(len(SONARR_URL)):
-                    handle_stalled_downloads(SONARR_URL[sonarrCount], SONARR_API_KEY[sonarrCount], "Sonarr"+str(sonarrCount), "v3")  # Handle regular stalled downloads
-                    detect_stuck_metadata_downloads(SONARR_URL[sonarrCount], SONARR_API_KEY[sonarrCount], "Sonarr"+str(sonarrCount), "v3")  # Detect stuck downloads at "Downloading Metadata"
-            
-            if LIDARR_URL is not None:
-                for lidarrCount in range(len(LIDARR_URL)):
-                    handle_stalled_downloads(LIDARR_URL[lidarrCount], LIDARR_API_KEY[lidarrCount], "lidarr"+str(lidarrCount), "v1")  # Handle regular stalled downloads
-                    detect_stuck_metadata_downloads(LIDARR_URL[lidarrCount], LIDARR_API_KEY[lidarrCount], "Lidarr"+str(lidarrCount), "v1")  # Detect stuck downloads at "Downloading Metadata"
-
-            if READARR_URL is not None:
-                for readarrCount in range(len(READARR_URL)):
-                    handle_stalled_downloads(READARR_URL[readarrCount], READARR_API_KEY[readarrCount], "readarr"+str(readarrCount), "v1")  # Handle regular stalled downloads
-                    detect_stuck_metadata_downloads(READARR_URL[readarrCount], READARR_API_KEY[readarrCount], "Readarr"+str(readarrCount), "v1")  # Detect stuck downloads at "Downloading Metadata"
-
-            logging.info(f"Script execution completed. Sleeping for {RUN_INTERVAL} seconds...")
-            time.sleep(RUN_INTERVAL)
+            logging.info(f"Script execution completed. Sleeping for {cfg.run_interval} seconds...")
+            time.sleep(cfg.run_interval)
     except KeyboardInterrupt:
         logging.info("Script terminated by user.")
     except Exception as e:

@@ -1,5 +1,4 @@
 import json
-from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -7,7 +6,6 @@ import responses
 
 import config
 from config import QueueItemDisposition as D
-from conftest import queue_item, queue_page
 
 BASE = "http://arr"
 DISPOSITIONS = [d for d in D if d is not D.IGNORE]
@@ -145,18 +143,3 @@ def test_legacy_action_parity(load_main, legacy, expected, search):
 
     assert delete_query() == expected
     assert bool(posts()) is search
-
-
-# TEMP test — removed in Phase 5 (invalid actions become fatal in load_config)
-@responses.activate
-def test_invalid_stalled_action_env_logs_and_makes_no_call(load_main, caplog):
-    m = load_main({"RADARR_URL": BASE, "RADARR_API_KEY": "k", "STALLED_ACTION": "EXPLODE",
-                   "STALLED_TIMEOUT": "3600"})
-    m.initialize_database()
-    m.add_stalled_download_to_db("1", datetime.now(timezone.utc) - timedelta(seconds=3700), "Radarr0")
-    responses.get(f"{BASE}/api/v3/queue", json=queue_page([queue_item(item_id=1)]))
-
-    m.handle_stalled_downloads(BASE, "k", "Radarr0", "v3")
-
-    assert [c for c in responses.calls if c.request.method == "DELETE"] == []
-    assert "Invalid STALLED_ACTION" in caplog.text

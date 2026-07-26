@@ -2,15 +2,7 @@ import pytest
 import requests
 import responses
 
-from conftest import queue_item
-
 QBIT = "http://qbit:8080"
-QBIT_ENV = {
-    "QBITTORRENT_URL": QBIT,
-    "QBITTORRENT_USERNAME": "admin",
-    "QBITTORRENT_PASSWORD": "pw",
-    "IGNORE_TORRENT_TAGS": "slow,manual",
-}
 
 LOGIN_URL = f"{QBIT}/api/v2/auth/login"
 INFO_URL = f"{QBIT}/api/v2/torrents/info"
@@ -145,56 +137,3 @@ def test_get_tags_unknown_hash_returns_empty_list(client):
 def test_get_tags_without_hash_makes_no_calls(client):
     assert client.get_tags(None) is None
     assert len(responses.calls) == 0
-
-
-@pytest.mark.parametrize("env", [{}, {"QBITTORRENT_URL": QBIT}])
-@responses.activate
-def test_should_ignore_without_qbit_config(load_main, env):
-    m = load_main(env)
-
-    assert m.should_ignore_download(queue_item()) is False
-    assert len(responses.calls) == 0
-
-
-@responses.activate
-def test_should_ignore_non_qbittorrent_client(load_main):
-    m = load_main(QBIT_ENV)
-
-    assert m.should_ignore_download(queue_item(download_client="SABnzbd")) is False
-    assert len(responses.calls) == 0
-
-
-@responses.activate
-def test_should_ignore_missing_download_id(load_main):
-    m = load_main(QBIT_ENV)
-
-    assert m.should_ignore_download(queue_item(download_id=None)) is False
-    assert len(responses.calls) == 0
-
-
-@responses.activate
-def test_should_ignore_tag_match(load_main):
-    m = load_main(QBIT_ENV)
-    responses.post(LOGIN_URL, body="Ok.")
-    responses.get(INFO_URL, json=[{"tags": "slow"}])
-
-    assert m.should_ignore_download(queue_item()) is True
-
-
-@responses.activate
-def test_should_ignore_tag_case_sensitive_no_match(load_main):
-    m = load_main(QBIT_ENV)
-    responses.post(LOGIN_URL, body="Ok.")
-    responses.get(INFO_URL, json=[{"tags": "Slow"}])
-
-    assert m.should_ignore_download(queue_item()) is False
-
-
-@responses.activate
-def test_should_ignore_lookup_failure_fails_open(load_main):
-    m = load_main(QBIT_ENV)
-    responses.post(LOGIN_URL, body="Ok.")
-    responses.get(INFO_URL, status=500)
-
-    # Fail-open is intended: qBittorrent being unreachable must not disable the handler.
-    assert m.should_ignore_download(queue_item()) is False
