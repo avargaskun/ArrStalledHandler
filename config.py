@@ -21,6 +21,12 @@ _ARR_TYPES = ("radarr", "sonarr", "lidarr", "readarr")
 _DIGITS_RE = re.compile(r"^[0-9]+$")
 _DURATION_RE = re.compile(r"^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
 
+# Alternation order is the mechanism: the $$ escape must win before ${...} is read as a
+# reference, and the bare ${ only matches when no closing brace follows.
+_DOLLAR_RE = re.compile(r"\$\$|\$\{([^}]*)\}|\$\{")
+# \Z, not $: Python's $ also matches before a trailing newline, so ${FOO\n} would pass.
+_VAR_SPEC_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(?::-(.*))?\Z", re.DOTALL)
+
 _UNIT_SECONDS = (86400, 3600, 60, 1)
 
 _LEGACY_ACTION_ALIASES = {
@@ -141,6 +147,7 @@ class ArrAppModel(_StrictModel):
 
     _check_name = field_validator("name")(_normalize_name)
     _check_url = field_validator("url")(_normalize_url)
+    _check_api_key = field_validator("apiKey")(_normalize_name)
 
 
 class DownloaderModel(_StrictModel):
@@ -231,7 +238,66 @@ def _format_validation_errors(error):
     return messages
 
 
-def _load_yaml_model(path):
+def _substitute_string(text, environ, path, problems):
+    def replace(match):
+        if match.group(0) == "$$":
+            return "$"
+
+        spec = match.group(1)
+        if spec is None:
+            problems.append(f"{path}: malformed variable reference ${{ (missing closing brace)")
+            return match.group(0)
+
+        parsed = _VAR_SPEC_RE.match(spec)
+        # A default containing ${ would silently weld a stray brace onto a resolved value.
+        if parsed is None or (parsed.group(2) is not None and "${" in parsed.group(2)):
+            problems.append(f"{path}: malformed variable reference ${{{spec}}}")
+            return match.group(0)
+
+        name, default = parsed.group(1), parsed.group(2)
+        value = environ.get(name)
+        if value is not None and value.strip():
+            return value
+        if default is not None:
+            return default
+        problems.append(
+            f"{path}: undefined variable ${{{name}}} (set it in the environment, "
+            f"or supply a default with ${{{name}:-...}})"
+        )
+        return match.group(0)
+
+    return _DOLLAR_RE.sub(replace, text)
+
+
+def _walk_substitute(node, environ, path, problems):
+    if isinstance(node, dict):
+        return {
+            key: _walk_substitute(value, environ, f"{path}.{key}" if path else str(key), problems)
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [
+            _walk_substitute(item, environ, f"{path}.{index}", problems)
+            for index, item in enumerate(node)
+        ]
+    if isinstance(node, str):
+        return _substitute_string(node, environ, path, problems)
+    return node
+
+
+def _substitute_env_vars(data, environ):
+    """Replace ${VAR} references in every string value of the parsed YAML.
+
+    Raises ConfigError carrying one message per unresolved or malformed reference.
+    """
+    problems = []
+    result = _walk_substitute(data, environ, "", problems)
+    if problems:
+        raise ConfigError(problems)
+    return result
+
+
+def _load_yaml_model(path, environ):
     """Parse and validate a YAML config file. Returns None when the file does not exist."""
     if not os.path.exists(path):
         return None
@@ -246,6 +312,8 @@ def _load_yaml_model(path):
 
     if not isinstance(data, dict):
         raise ConfigError(f"{path}: expected a mapping at the top level")
+
+    data = _substitute_env_vars(data, environ)
 
     try:
         return YamlConfigModel.model_validate(data)
@@ -523,7 +591,7 @@ def load_config(config_path=None, environ=None):
     path = config_path or _env(environ, "CONFIG_FILE") or DEFAULT_CONFIG_PATH
 
     try:
-        model = _load_yaml_model(path)
+        model = _load_yaml_model(path, environ)
         if model is None:
             logging.info(f"No config file at {path}; using environment variables only")
         else:

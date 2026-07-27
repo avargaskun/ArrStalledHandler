@@ -27,6 +27,8 @@ Two layers, deliberately separated: pydantic models parse and validate YAML (`Ya
 
 `load_config(config_path=None, environ=None)` is the only entry point. It resolves the path, parses the file if present, merges env fallbacks, and returns an `AppConfig`. Every problem found is accumulated into a `ConfigError` and converted — only here — into one `logging.error` per message plus `SystemExit(1)`. Merge granularity: **section-level** for `arrApps`/`downloaders`/`watchers` (present in YAML ⇒ the corresponding env vars are ignored entirely), **key-level** for scalars. All env reads treat `""` as unset, because the shipped `compose.yaml` renders unset vars as empty strings.
 
+`${VAR}` / `${VAR:-default}` substitution (`_substitute_env_vars`) runs inside `_load_yaml_model(path, environ)` between parse and validate, walking the *parsed values* — never the raw file text, so a secret containing `:`/`#`/quotes/newlines cannot alter the document. It reads the `environ` passed to `load_config` (never `os.environ`), treats an empty or whitespace-only environment value as unset while using a supplied default verbatim (`${A:-}` → `""`), and raises a `ConfigError` listing every unresolved or malformed reference. `$$` is the escape for a literal `$`.
+
 Also here: `parse_duration` (bare int = seconds, else `1h30m`-style compound) and `QueueItemDisposition` (nine 4-tuple members mapping to the DELETE params, plus the `IGNORE` sentinel which has no params and never reaches the API; `parse()` accepts the legacy `BLOCKLIST`/`BLOCKLIST_AND_SEARCH` aliases).
 
 ### `main.py`
