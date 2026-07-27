@@ -3,4 +3,5 @@
 
 # Allow only specific files
 !main.py
+!config.py
 !requirements.txt
