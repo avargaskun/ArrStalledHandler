@@ -11,6 +11,36 @@
 #
 # Durations accept a plain number of seconds (3600) or a compound value in
 # strict d/h/m/s order with at least one component: 45s, 5m, 1h30m, 2d.
+#
+# Variable substitution: any value below may reference an environment variable,
+# so secrets can stay in the environment while the rest lives in this file.
+#
+#   ${VAR}           the value of VAR. Unset, empty or whitespace-only is a
+#                    fatal startup error (Compose renders unset variables as "").
+#   ${VAR:-default}  VAR, or the default when VAR is unset/empty. The default is
+#                    used verbatim, so ${VAR:-} is an explicit empty string.
+#   $$               a literal $.
+#   $${VAR}          a literal ${VAR} — the escape for a value that must really
+#                    contain "${".
+#
+# Braces are required: a bare $VAR is left untouched. A malformed reference is a
+# fatal startup error, never a literal: ${1FOO}, ${FOO BAR}, ${FOO-BAR}, a
+# missing closing brace, and a default that itself contains ${ are all rejected.
+# Substitution is single-pass — a substituted value is never rescanned — and
+# applies to values only, never to keys.
+#
+# Quoting inside flow collections: "{" is a YAML flow indicator, so
+# `tags: [${TAG}]` is a YAML *parse* error and substitution never runs. Write
+# `tags: ["${TAG}"]`, or use a block sequence:
+#     tags:
+#       - ${TAG}
+#
+# Note the two different roles an environment variable can play here:
+#   - as a section fallback (RADARR_URL, RADARR_API_KEY, QBITTORRENT_*, ...):
+#     consulted only when the matching YAML section is absent, and ignored
+#     entirely when it is present;
+#   - as a value inside this file (any ${...} reference): substituted wherever
+#     it appears, regardless of which sections exist.
 
 version: 1                                # required; must be 1
 
@@ -45,7 +75,10 @@ arrApps:
                                           #   database key, so renaming resets that instance's
                                           #   in-flight stall timers once
     url: localhost:7878                   # required; "http://" is prefixed when no scheme is given
-    apiKey: xxxyyyzzz                     # required
+    apiKey: ${ANIME_RADARR_API_KEY}       # required; here read from the environment. This is a
+                                          #   value substitution, so the name is yours to choose —
+                                          #   unlike the RADARR_API_KEY fallback above, which stays
+                                          #   ignored because the arrApps section is present.
     forceSearch: true                     # optional; default true. When a *_SEARCH action runs,
                                           #   send an explicit Command API search (MoviesSearch /
                                           #   EpisodeSearch). Set false to rely on the *arr server's
@@ -53,7 +86,7 @@ arrApps:
                                           #   Lidarr/Readarr never get an explicit search.
   - type: sonarr
     name: tv
-    url: http://localhost:8989
+    url: ${TV_SONARR_URL:-http://localhost:8989}   # default used when the variable is unset/empty
     apiKey: aaabbbccc
 
 # Download client used to read torrent tags for watcher matching.
@@ -79,6 +112,7 @@ watchers:
     # from any other client simply fall through to the next watcher.
     # Omit (or leave empty) to match every download — that makes the block a
     # catch-all, so anything after it is unreachable.
+    # A ${VAR} reference in this inline form must be quoted — tags: ["${TAG}"].
     tags: [keep, private]
     stalledTimeout: 6h                    # optional duration; default 1h
     action: IGNORE                        # optional; default REMOVE_AND_BLOCKLIST_SEARCH

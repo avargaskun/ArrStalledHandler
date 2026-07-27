@@ -871,9 +871,11 @@ def test_validation_errors_never_log_secrets(tmp_path, caplog):
 def test_shipped_example_yaml_is_valid():
     """example.yaml is the canonical schema documentation; it must actually load."""
     example = pathlib.Path(__file__).resolve().parent.parent / "example.yaml"
-    cfg = config.load_config(str(example), environ={})
+    cfg = config.load_config(str(example), environ={"ANIME_RADARR_API_KEY": "abc123"})
 
     assert [a.name for a in cfg.arr_apps] == ["anime-movies", "tv"]
+    assert cfg.arr_apps[0].api_key == "abc123"
+    assert cfg.arr_apps[1].url == "http://localhost:8989"
     assert cfg.downloader.name == "default"
     assert cfg.watchers[0].action is config.QueueItemDisposition.IGNORE
     assert cfg.watchers[-1].tags == ()
@@ -892,6 +894,60 @@ arrApps:
                           environ={})
 
     assert SECRET_KEY not in errors
+
+
+def test_bad_password_type_does_not_log_its_value(tmp_path, caplog):
+    errors = assert_exits(caplog, "downloaders.0.password",
+                          config_path=write_yaml(tmp_path, f"""
+version: 1
+arrApps:
+  - type: radarr
+    name: a
+    url: localhost:7878
+    apiKey: {SECRET_KEY}
+downloaders:
+  - type: qbittorrent
+    name: d
+    url: localhost:8080
+    password: [{SECRET_PASSWORD}]
+"""),
+                          environ={})
+
+    assert SECRET_KEY not in errors
+    assert SECRET_PASSWORD not in errors
+
+
+def test_substitution_errors_never_log_resolved_secrets(tmp_path, caplog):
+    errors = assert_exits(caplog,
+                          "arrApps.1.apiKey", "MISSING_KEY",
+                          "downloaders.0.password", "MISSING_PASSWORD",
+                          "watchers.0.name", "FOO BAR",
+                          config_path=write_yaml(tmp_path, """
+version: 1
+arrApps:
+  - type: radarr
+    name: a
+    url: localhost:7878
+    apiKey: ${GOOD_KEY}
+  - type: sonarr
+    name: b
+    url: localhost:8989
+    apiKey: prefix-${MISSING_KEY}-suffix
+downloaders:
+  - type: qbittorrent
+    name: d
+    url: localhost:8080
+    username: admin
+    password: ${MISSING_PASSWORD}
+watchers:
+  - name: ${FOO BAR}
+"""),
+                          environ={"GOOD_KEY": SECRET_KEY, "GOOD_PASSWORD": SECRET_PASSWORD})
+
+    assert SECRET_KEY not in errors
+    assert SECRET_PASSWORD not in errors
+    assert "prefix-" not in errors
+    assert "suffix" not in errors
 
 
 # --- variable substitution engine -------------------------------------------------------

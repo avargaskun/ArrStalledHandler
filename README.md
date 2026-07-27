@@ -122,6 +122,84 @@ Two different granularities apply:
 
 An empty list (`arrApps: []`) is an error, not "fall back to the environment" — omit the key entirely for that.
 
+### Variable substitution
+
+Any value in the YAML file may reference an environment variable, so a full-YAML deployment can keep its secrets in the environment instead of on disk:
+
+``` yaml
+version: 1
+arrApps:
+  - type: radarr
+    name: anime-movies
+    url: ${ANIME_RADARR_URL:-http://localhost:7878}
+    apiKey: ${ANIME_RADARR_API_KEY}
+  - type: sonarr
+    name: tv
+    url: http://localhost:8989
+    apiKey: ${TV_SONARR_API_KEY}
+downloaders:
+  - type: qbittorrent
+    name: default
+    url: http://localhost:8080
+    username: admin
+    password: ${QBITTORRENT_PASSWORD}
+watchers:
+  - name: seeding-protection
+    tags: ["${PROTECTED_TAG}"]      # quoted: see the flow-collection rule below
+    action: IGNORE
+  - name: default
+    stalledTimeout: 1h
+    action: REMOVE_AND_BLOCKLIST_SEARCH
+```
+
+The file above is safe to commit; the secrets stay in `.env` / the container environment.
+
+| Form | Meaning |
+|---|---|
+| `${VAR}` | The value of `VAR`. Fatal startup error when unset or empty. |
+| `${VAR:-default}` | `VAR`, or `default` when `VAR` is unset or empty. |
+| `$$` | A literal `$`. |
+| `$${VAR}` | A literal `${VAR}` — `$$` collapses to `$` and `{VAR}` is ordinary text. This is the escape for a value that must genuinely contain `${`. |
+| `$` anywhere else | Left untouched. |
+
+Rules worth knowing:
+
+-   **Empty means unset.** A variable whose value is empty or whitespace-only counts as unset, because Docker Compose renders every unset variable in an `environment:` block as `""`. Without this rule a typo'd variable name would substitute an empty API key and the service would start and poll unauthenticated.
+-   **A supplied default is used verbatim, empty included.** The rule is "did the reference supply a default", not "is the default non-empty", so `${VAR:-}` resolves to `""` with no error. That is how an intentionally empty qBittorrent password is expressed: `password: "${QBITTORRENT_PASSWORD:-}"`. (An empty `apiKey` is rejected — see below.)
+-   **The substituted value is inserted raw.** Only the emptiness *test* strips, so leading/trailing whitespace in a password survives.
+-   **Substitution runs on parsed values, not on the file text.** A secret containing `:`, `#`, a quote or a newline cannot corrupt the document structure.
+-   **Unresolved and malformed references are fatal**, and every one in the file is reported in a single run before the script exits `1`:
+
+    ```
+    ERROR - Invalid configuration in /data/config.yaml:
+    ERROR -   arrApps.0.apiKey: undefined variable ${ANIME_RADARR_API_KEY} (set it in the environment, or supply a default with ${ANIME_RADARR_API_KEY:-...})
+    ```
+
+-   **An empty `apiKey` is rejected** by validation — including one produced by `${MISSING:-}` — with an `arrApps.N.apiKey` error. `username`/`password` stay permissive, since qBittorrent's whitelisted-subnet auth bypass legitimately needs none.
+
+**Quoting inside flow collections.** `{` is a YAML flow indicator, so an *unquoted* reference inside `[...]` or `{...}` is a YAML **parse** error — substitution never runs and the file is simply reported as invalid YAML, with nothing in the message about substitution. Write `tags: ["${TAG}"]`, or use a block sequence:
+
+``` yaml
+tags:
+  - ${TAG}
+```
+
+In block context (`apiKey: ${VAR}`, block sequence items) no quoting is needed. Only the inline `tags: [keep, private]` style shown elsewhere in this document needs the quotes.
+
+**Not supported**, deliberately:
+
+-   **Bare `$VAR`** — braces are always required, so a `$` in a password or path is never touched.
+-   **`${VAR-default}`** (hyphen without colon) — there is exactly one notion of unset here, so the second form would be a distinction without a difference. It is reported as a malformed reference.
+-   **Recursion** — a substituted value is never rescanned, so an environment variable cannot inject a reference to another one.
+-   **Keys** — substitution applies to values only; keys are schema field names.
+-   **A default containing `${`** — `${A:-${OTHER}}` is rejected as malformed rather than silently resolving to `x}`. Supply the value through the environment instead.
+
+**Environment variables play two distinct roles.** As a **section fallback** (`RADARR_URL`, `RADARR_API_KEY`, `QBITTORRENT_*`, …) a variable is consulted only when the matching YAML section is *absent*, and stays ignored when the section is present — the precedence table above. As a **value inside the file**, any `${…}` reference is substituted wherever it appears, regardless of which sections exist. The example above uses `${ANIME_RADARR_API_KEY}` rather than `${RADARR_API_KEY}` to keep the two apart; the name in a reference is yours to choose.
+
+**Forwarding variables into a container.** Only variables that actually reach the container can be substituted. The shipped [`compose.yaml`](compose.yaml) pairs its explicit `environment:` block with an optional `env_file: .env` (`required: false`, so a missing file is fine), so every name in your `.env` — including custom ones like `ANIME_RADARR_API_KEY` — is available inside the container. The `environment:` entries still win on conflict. That is safe here because this repository's `.env` is app-scoped: it holds nothing but ArrStalledHandler's own settings. **If your `.env` is shared across several services, do not copy that pattern** — keep an explicit `environment:` list and add only the names you need, or you hand this container every other stack's credentials. For `docker run`, pass `--env-file .env` (or an extra `-e NAME=value` per variable); the fixed `-e` list in the examples below forwards only the legacy variable names.
+
+**Migration caveat.** A config file containing no `${` and no `$$` behaves exactly as before. Two sequences change meaning: a value that already contains a literal `${` now either substitutes or, more likely, fails at startup (`password: "ab${cd}ef"` → `undefined variable ${cd}`; `password: "ab${cd"` → a malformed reference where it used to be literal text), and `$$` now collapses to `$`. The fix in both cases is the `$$` escape: write `password: "ab$${cd}ef"`.
+
 ### Durations
 
 `runInterval` and `watchers[].stalledTimeout` accept either a plain number of seconds or a compound value:
@@ -350,6 +428,8 @@ services:
 **Docker CLI**
 
 More info at [Docker Docs](https://docs.docker.com/engine/containers/run/).
+
+`docker run` has no `env_file` equivalent to the one in `compose.yaml`: the `-e` list below forwards exactly the legacy variable names. If your `config.yaml` references any other name via [variable substitution](#variable-substitution), add `--env-file .env` (or one more `-e NAME=value` per variable) — otherwise it resolves to nothing inside the container and startup fails.
 
 *Multi-line:*
 ``` bash
