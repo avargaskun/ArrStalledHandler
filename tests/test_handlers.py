@@ -312,6 +312,38 @@ def test_item_without_download_id_falls_through_to_untagged_watcher(load_main):
 
 
 @responses.activate
+def test_null_download_client_falls_through_to_untagged_watcher(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["slow"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    qbit = qbit_client(m, [])
+    # A JSON null survives dict.get's default, so this used to raise AttributeError
+    # and kill the whole poll loop.
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1, download_client=None)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    assert query("DELETE") == BLOCKLIST_PARAMS
+    assert info_calls() == []
+
+
+@responses.activate
+def test_null_error_message_is_skipped_without_crashing(load_main):
+    m = load_main()
+    cfg = make_config()
+    m.initialize_database(cfg.db_file)
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1, error=None)]))
+
+    m.handle_stalled_downloads(cfg, APP, None)
+
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {}
+    assert calls("DELETE") == []
+
+
+@responses.activate
 def test_tags_fetched_once_per_item(load_main):
     m = load_main()
     cfg = tracked_config(m, make_config(watchers=(
@@ -447,6 +479,32 @@ def test_metadata_and_stalled_share_db_namespace(load_main):
 
     assert len(calls("DELETE")) == 1
     assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {}
+
+
+@responses.activate
+def test_metadata_flow_skips_null_error_message(load_main):
+    m = load_main()
+    cfg = make_config(count_metadata_as_stalled=True)
+    m.initialize_database(cfg.db_file)
+    # status=queued items routinely carry no error message at all.
+    responses.get(QUEUE_URL, json=queue_page([
+        queue_item(item_id=1, error=None),
+        queue_item(item_id=2, error=METADATA_ERROR),
+    ]))
+
+    m.detect_stuck_metadata_downloads(cfg, APP, None)
+
+    assert list(m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file)) == ["2"]
+
+
+@responses.activate
+def test_metadata_flow_empty_queue_no_db_access(load_main):
+    m = load_main()
+    responses.get(QUEUE_URL, json=queue_page([]))
+
+    m.detect_stuck_metadata_downloads(make_config(count_metadata_as_stalled=True), APP, None)
+
+    assert len(responses.calls) == 1
 
 
 @responses.activate

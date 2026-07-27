@@ -194,7 +194,7 @@ def match_watcher(item, watchers, qbit):
         if not watcher.tags:
             return watcher
 
-        if qbit is None or 'qbittorrent' not in item.get('downloadClient', '').lower():
+        if qbit is None or 'qbittorrent' not in (item.get('downloadClient') or '').lower():
             continue  # tagged watchers can never match an item we cannot look up
 
         if item_tags is None:
@@ -267,7 +267,7 @@ def detect_stuck_metadata_downloads(cfg, app, qbit):
     tracked = get_stalled_downloads_from_db(app.name, db_file=cfg.db_file)
 
     for item in metadata_records:
-        if item.get("errorMessage", "").lower() == "qbittorrent is downloading metadata":
+        if (item.get("errorMessage") or "").lower() == "qbittorrent is downloading metadata":
             _process_queue_item(cfg, app, qbit, item, tracked)
 
 def query_api_paginated(base_url, headers, params=None, page_size=50):
@@ -363,7 +363,7 @@ def handle_stalled_downloads(cfg, app, qbit):
 
     tracked = get_stalled_downloads_from_db(app.name, db_file=cfg.db_file)
     for item in queue_records:
-        if item.get("errorMessage", "").lower() == "the download is stalled with no connections":
+        if (item.get("errorMessage") or "").lower() == "the download is stalled with no connections":
             _process_queue_item(cfg, app, qbit, item, tracked)
 
 # --- Health Check Server Logic ---
