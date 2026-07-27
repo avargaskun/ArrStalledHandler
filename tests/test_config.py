@@ -920,7 +920,7 @@ downloaders:
 def test_substitution_errors_never_log_resolved_secrets(tmp_path, caplog):
     errors = assert_exits(caplog,
                           "arrApps.1.apiKey", "MISSING_KEY",
-                          "downloaders.0.password", "MISSING_PASSWORD",
+                          "downloaders.0.username", "MISSING_USER",
                           "watchers.0.name", "FOO BAR",
                           config_path=write_yaml(tmp_path, """
 version: 1
@@ -937,8 +937,8 @@ downloaders:
   - type: qbittorrent
     name: d
     url: localhost:8080
-    username: admin
-    password: ${MISSING_PASSWORD}
+    username: ${MISSING_USER}
+    password: ${GOOD_PASSWORD}
 watchers:
   - name: ${FOO BAR}
 """),

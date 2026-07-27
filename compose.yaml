@@ -7,6 +7,7 @@ services:
     # from config.yaml (see README "Variable substitution") resolve there too.
     # Safe because this .env is app-scoped; with a .env shared across services,
     # drop this and list only the names you need in `environment:` below.
+    # The `required:` form needs Compose 2.24+; on older versions use `env_file: .env`.
     env_file:
       - path: .env
         required: false

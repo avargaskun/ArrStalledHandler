@@ -14,6 +14,8 @@
 #
 # Variable substitution: any value below may reference an environment variable,
 # so secrets can stay in the environment while the rest lives in this file.
+# This file uses the feature itself, so copying it as-is requires
+# ANIME_RADARR_API_KEY to be set (TV_SONARR_URL has a default and may be omitted).
 #
 #   ${VAR}           the value of VAR. Unset, empty or whitespace-only is a
 #                    fatal startup error (Compose renders unset variables as "").
