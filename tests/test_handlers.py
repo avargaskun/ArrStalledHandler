@@ -295,6 +295,23 @@ def test_unknown_hash_falls_through_to_untagged_watcher(load_main):
 
 
 @responses.activate
+def test_item_without_download_id_falls_through_to_untagged_watcher(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["slow"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    qbit = qbit_client(m, [])
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1, download_id=None)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    assert query("DELETE") == BLOCKLIST_PARAMS
+    assert info_calls() == []
+
+
+@responses.activate
 def test_tags_fetched_once_per_item(load_main):
     m = load_main()
     cfg = tracked_config(m, make_config(watchers=(

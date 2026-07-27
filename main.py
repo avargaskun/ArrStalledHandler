@@ -147,9 +147,10 @@ class QbitClient:
             return False
 
     def get_tags(self, info_hash):
-        """Return the torrent's tags, [] when qBittorrent doesn't know the hash, None on failure."""
+        """Return the torrent's tags, [] when there is no hash to look up or qBittorrent
+        doesn't know it, None on failure."""
         if not info_hash:
-            return None
+            return []
 
         # An auth-bypass login yields an empty cookie jar, so identity — not truthiness — decides.
         if self.session is None or self.cookies is None:

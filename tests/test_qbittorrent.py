@@ -135,5 +135,8 @@ def test_get_tags_unknown_hash_returns_empty_list(client):
 
 @responses.activate
 def test_get_tags_without_hash_makes_no_calls(client):
-    assert client.get_tags(None) is None
+    # An item with no hash can't carry tags; that is "no tags", not a failed lookup,
+    # so the caller falls through to untagged watchers instead of skipping it forever.
+    assert client.get_tags(None) == []
+    assert client.get_tags("") == []
     assert len(responses.calls) == 0
