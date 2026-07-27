@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/avargaskun/ArrStalledHandler/compare/v1.3.0...v1.3.1) (2026-07-27)
+
+
+### Bug Fixes
+
+* include config.py in the Docker image ([#11](https://github.com/avargaskun/ArrStalledHandler/issues/11)) ([089c8c3](https://github.com/avargaskun/ArrStalledHandler/commit/089c8c39ec3b0606a3f29475a0d7e6dfc1d10819))
+
 ## [1.3.0](https://github.com/avargaskun/ArrStalledHandler/compare/v1.2.2...v1.3.0) (2026-07-27)
 
 
