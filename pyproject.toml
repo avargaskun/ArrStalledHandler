@@ -1,7 +1,7 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "--cov=main --cov-report=term-missing --cov-fail-under=85"
+addopts = "--cov=main --cov=config --cov-report=term-missing --cov-fail-under=85"
 
 [tool.coverage.run]
 branch = true

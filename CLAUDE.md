@@ -4,32 +4,46 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-ArrStalledHandler is a single-file Python service (`main.py`) that polls Radarr/Sonarr/Lidarr/Readarr queues for stalled torrent downloads and, after a configurable timeout, removes/blocklists/re-searches them. It optionally integrates with qBittorrent to skip torrents carrying ignore tags and to detect downloads stuck on "Downloading Metadata".
+ArrStalledHandler is a Python service that polls Radarr/Sonarr/Lidarr/Readarr queues for stalled torrent downloads and, after a per-policy timeout, applies one of nine queue-disposition actions (remove/blocklist/change-category/keep, with or without a re-search). It optionally integrates with qBittorrent to read torrent tags — which drive the policy matching — and to detect downloads stuck on "Downloading Metadata". Two modules: `config.py` (load/validate/merge configuration) and `main.py` (everything else).
 
 ## Commands
 
 ```bash
-pip install -r requirements.txt   # Python 3.13
-python main.py                    # runs forever: poll → act → sleep RUN_INTERVAL
+pip install -r requirements.txt -r requirements-dev.txt   # Python 3.13
+python main.py                    # runs forever: poll → act → sleep runInterval
+./.venv/bin/pytest                # full suite; coverage gate 85% over main.py + config.py
 docker compose up -d --build      # containerized run (compose.yaml reads .env)
 ```
 
-Configuration is entirely via environment variables loaded from `.env` (copy `.env.example`; the full table is in README.md). At minimum one `*_URL`/`*_API_KEY` pair is needed. Setting `VERBOSE=true` enables debug logging. There is no test suite and no linter; CI (`.github/workflows/ci.yml`) only verifies the Docker image builds.
+Configuration comes from an optional YAML file plus environment variables (`.env` is loaded at startup). The file path is `CONFIG_FILE`, default `/data/config.yaml`; a missing file means pure env mode, an invalid one is fatal. `example.yaml` is the canonical schema reference and README.md documents both mechanisms. At minimum one *arr instance must be configured (`arrApps` or a `*_URL`/`*_API_KEY` pair) or startup fails.
 
-Running locally creates `stalled_downloads.db` (SQLite, gitignored) in the working directory and starts a health-check HTTP server on port 9898 (`GET /ping`).
+Running locally creates `stalled_downloads.db` (SQLite, gitignored, path configurable via `dbFile`) in the working directory and starts a health-check HTTP server on port 9898 (`GET /ping`, configurable/disableable via `healthCheck`).
 
 ## Architecture
 
-Everything lives in `main.py`, executed top to bottom:
+### `config.py`
 
-1. **Config parsing (module level)**: each `*arr` service's `URL`/`API_KEY` env vars are comma-split into parallel lists, so one process can watch multiple instances of the same service.
-2. **Main loop** (`__main__`): for each configured service instance it calls `handle_stalled_downloads()` (queue items with `status=warning` and error message `"The download is stalled with no connections"`) and `detect_stuck_metadata_downloads()` (queue items with `status=queued` and error `"qBittorrent is downloading metadata"`, gated by `COUNT_DOWNLOADING_METADATA_AS_STALLED`). Both flows share the same downstream logic.
-3. **Timeout tracking (SQLite)**: first sighting of a stalled download inserts `(download_id, first_detected, arr_service)` into `stalled_downloads.db`; action is only taken once elapsed time exceeds `STALLED_TIMEOUT`, then the row is deleted. The `arr_service` key is the service name plus instance index (e.g. `"Radarr0"`, `"Sonarr1"`) — it namespaces rows between instances, so keep it stable.
-4. **Actions** (`perform_action`): `REMOVE`, `BLOCKLIST`, or `BLOCKLIST_AND_SEARCH` map onto the *arr queue DELETE endpoint (with `blocklist`/`skipRedownload` params) plus, for the search variant, a Command API POST (`MoviesSearch` for Radarr, `EpisodeSearch` for Sonarr; Lidarr/Readarr get no re-search).
-5. **qBittorrent ignore filter** (`should_ignore_download`): only applies when the queue item's download client is qBittorrent; the *arr `downloadId` is the torrent info hash, used to look up tags via the qBittorrent Web API. Session login is cached globally with re-login on 403. A `204`/empty login response means auth-bypass (whitelisted subnet) and counts as success.
-6. **Health server**: a daemon thread serves `GET /ping` → 200 on port 9898 for container health checks; requests are deliberately not logged.
+Two layers, deliberately separated: pydantic models parse and validate YAML (`YamlConfigModel` and friends, all `extra="forbid"`), and frozen dataclasses (`AppConfig`, `ArrApp`, `Downloader`, `Watcher`) are the runtime API — no pydantic types leak into `main.py`.
 
-API versions differ by service: Radarr/Sonarr use `v3`, Lidarr/Readarr use `v1`. All queue reads go through `query_api_paginated`, which pages until `totalRecords` is reached.
+`load_config(config_path=None, environ=None)` is the only entry point. It resolves the path, parses the file if present, merges env fallbacks, and returns an `AppConfig`. Every problem found is accumulated into a `ConfigError` and converted — only here — into one `logging.error` per message plus `SystemExit(1)`. Merge granularity: **section-level** for `arrApps`/`downloaders`/`watchers` (present in YAML ⇒ the corresponding env vars are ignored entirely), **key-level** for scalars. All env reads treat `""` as unset, because the shipped `compose.yaml` renders unset vars as empty strings.
+
+Also here: `parse_duration` (bare int = seconds, else `1h30m`-style compound) and `QueueItemDisposition` (nine 4-tuple members mapping to the DELETE params, plus the `IGNORE` sentinel which has no params and never reaches the API; `parse()` accepts the legacy `BLOCKLIST`/`BLOCKLIST_AND_SEARCH` aliases).
+
+### `main.py`
+
+1. **`main()`**: `logging.basicConfig` → `load_dotenv()` → `config.load_config()` → verbose level → optional health thread → `initialize_database`/`prune_orphaned_services` → build `QbitClient` → poll loop. Importing the module has no side effects; keep it that way.
+2. **Poll loop**: for each `cfg.arr_apps` entry, `handle_stalled_downloads(cfg, app, qbit)` (queue items with `status=warning` and error `"the download is stalled with no connections"`) and `detect_stuck_metadata_downloads(cfg, app, qbit)` (`status=queued`, error `"qbittorrent is downloading metadata"`, gated by `cfg.count_metadata_as_stalled`). Both filters are case-insensitive. The flows differ only in query params and error filter; per-item logic is shared in `_process_queue_item`.
+3. **Policy matching** (`match_watcher`): watchers are walked in order, first match wins, re-matched every cycle. An untagged watcher matches everything; tagged watchers require a configured downloader and a qBittorrent queue item. Tags are fetched at most once per item, case-insensitively OR-matched. A failed tag lookup returns the `SKIP_ITEM` sentinel — the item is skipped this cycle rather than falling through to a destructive default. `load_config` guarantees a catch-all watcher exists.
+4. **Timeout tracking (SQLite)**: first sighting inserts `(download_id, first_detected, arr_service)`; action is taken once elapsed time exceeds *the matched watcher's* `stalled_timeout`, then the row is deleted. `arr_service` is `ArrApp.name` — env mode synthesizes `Radarr0`/`Sonarr1`/`Lidarr0`/`Readarr0`, YAML mode uses the user's `name`, so renaming resets timers once. `prune_orphaned_services` clears rows for names no longer configured. An `IGNORE` match does no DB work at all, leaving any pre-existing row intact.
+5. **Actions** (`perform_action(app, download_id, movie_id, episode_ids, action)`): always sends all four params from `action.as_params()` to the *arr queue DELETE endpoint. `_SEARCH` dispositions additionally POST a Command API search when `app.force_search` — `MoviesSearch` for Radarr, `EpisodeSearch` for Sonarr; Lidarr/Readarr get no re-search.
+6. **`QbitClient`**: owns session, login and `get_tags(info_hash)`. Return contract matters: `None` = lookup failed (caller skips the item), `[]` = successful lookup with no tags or an unknown hash (caller falls through). Re-logs in once on 403. A `204`/empty login response means auth-bypass (whitelisted subnet) and counts as success.
+7. **Health server**: a daemon thread serves `GET /ping` → 200 on `cfg.health_port`; requests are deliberately not logged.
+
+API versions differ by service: Radarr/Sonarr use `v3`, Lidarr/Readarr use `v1` (`ArrApp.api_version`). All queue reads go through `query_api_paginated`, which pages until `totalRecords` is reached.
+
+## Tests
+
+pytest + `responses` in `tests/`; `pyproject.toml` enforces `--cov=main --cov=config --cov-fail-under=85`, so partial runs need `--no-cov`. `tests/conftest.py` provides `make_config`/`make_app`/`make_watcher` builders for handler tests and a `load_main` fixture that reloads `main` under a controlled environment. Config tests call `config.load_config(path, environ=dict)` directly — no monkeypatching needed. CI runs the suite on every PR alongside the Docker image build.
 
 ## Releases and PR titles
 

@@ -1,6 +1,6 @@
 # ArrStalledHandler
 
-ArrStalledHandler is a Python-based script designed to handle stalled downloads in [Radarr](https://radarr.video/), [Sonarr](https://sonarr.tv/), [Lidarr](https://lidarr.audio/) and [Readarr](https://readarr.com/) by taking actions such as removing, blocklisting, or blocklisting and re-searching for the affected items. It supports configuration through a `.env` file, logging for visibility, and is deployable via Docker for ease of use.
+ArrStalledHandler is a Python-based script designed to handle stalled downloads in [Radarr](https://radarr.video/), [Sonarr](https://sonarr.tv/), [Lidarr](https://lidarr.audio/) and [Readarr](https://readarr.com/) by taking actions such as removing, blocklisting, or blocklisting and re-searching for the affected items. It supports configuration through a `.env` file or a [YAML configuration file](#yaml-configuration), logging for visibility, and is deployable via Docker for ease of use.
 
 This repository is licensed under the **[GNU General Public License v3.0 (GPLv3)](LICENSE)**.
 
@@ -22,6 +22,10 @@ This project is available on [GitHub](https://github.com/avargaskun/ArrStalledHa
         -   Remove the stalled download.
         -   Blocklist the stalled download.
         -   Blocklist and re-trigger a search for the movie or episodes.
+-   **Per-Tag Policies (`watchers`)**:
+    -   With a [YAML config file](#yaml-configuration), define ordered policy blocks matched on qBittorrent tags.
+    -   Each block gets its own stall timeout and action, including `IGNORE` (leave the download alone).
+    -   Nine action dispositions cover every combination of the *arr queue-delete parameters.
 -   **Selective Ignore via qBittorrent Tags**:
     -   Dynamically ignore specific downloads by applying tags in qBittorrent.
     -   Tagged downloads will remain stalled without any action taken.
@@ -32,14 +36,19 @@ This project is available on [GitHub](https://github.com/avargaskun/ArrStalledHa
 -   **Docker Support**:
     -   Easily deployable with Docker and customizable run intervals.
 -   **Health Check Endpoint**:
-    -   Exposes an HTTP `GET /ping` endpoint on port `9898` for container health checks.
+    -   Exposes an HTTP `GET /ping` endpoint on port `9898` (configurable) for container health checks.
 
 ----------
 
 
 ## Configuration
 
-The script is fully configurable using environment variables specified in a `.env` file. Below is a description of each configuration option:
+There are two ways to configure the script:
+
+-   **Environment variables** (a `.env` file, Docker `-e` flags, or a compose `environment:` block) — the original mechanism, unchanged and still fully supported.
+-   **A [YAML configuration file](#yaml-configuration)** — required for named instances, per-tag policies and the full action vocabulary.
+
+Both can be combined: the YAML file takes precedence for whatever it defines, and anything it leaves out falls back to the environment. If no config file exists, the script runs in pure environment mode exactly as before.
 
 ### `.env` Variables
 
@@ -57,13 +66,137 @@ The script is fully configurable using environment variables specified in a `.en
 | `QBITTORRENT_USERNAME`                  | Username for qBittorrent Web UI authentication.                                                 | None (optional)        |
 | `QBITTORRENT_PASSWORD`                  | Password for qBittorrent Web UI authentication.                                                 | None (optional)        |
 | `IGNORE_TORRENT_TAGS`                   | Comma-separated list of qBittorrent tags. Torrents with these tags will be ignored.             | None (optional)        |
-| `STALLED_TIMEOUT`                       | Time (in seconds) a download must remain stalled before actions are taken.                      | `3600` (1 hour)        |
-| `STALLED_ACTION`                        | Action to perform on stalled downloads: `REMOVE`, `BLOCKLIST`, or `BLOCKLIST_AND_SEARCH`.       | `BLOCKLIST_AND_SEARCH` |
+| `STALLED_TIMEOUT`                       | How long a download must remain stalled before actions are taken. Seconds, or a [duration](#durations) like `1h30m`. | `3600` (1 hour)        |
+| `STALLED_ACTION`                        | Action to perform on stalled downloads. Accepts the legacy names `REMOVE`, `BLOCKLIST` and `BLOCKLIST_AND_SEARCH` as well as any of the [new disposition names](#actions-dispositions). | `BLOCKLIST_AND_SEARCH` |
 | `VERBOSE`                               | Enable verbose logging for debugging (`true` or `false`).                                       | `false`                |
-| `RUN_INTERVAL`                          | Time (in seconds) between script executions when running in Docker.                             | `300` (5 minutes)      |
-| `COUNT_DOWNLOADING_METADATA_AS_STALLED` | Weather the script should count downloads with the status of "Downloading Metadata" as stalled. | `false`                |
+| `RUN_INTERVAL`                          | Time between script executions when running in Docker. Seconds, or a [duration](#durations).    | `300` (5 minutes)      |
+| `COUNT_DOWNLOADING_METADATA_AS_STALLED` | Whether the script should count downloads with the status of "Downloading Metadata" as stalled. | `false`                |
+| `CONFIG_FILE`                           | Path to the optional [YAML configuration file](#yaml-configuration). A missing file is not an error. | `/data/config.yaml`    |
 
 To disable Radarr or Sonarr; leave the URL empty in the environment. If the service does not have a URL, then it is skipped. Multple services are allowed by using comma seperated values.
+
+If no *arr instance is configured at all — neither through the environment nor through the config file — the script logs an error and exits immediately instead of idling.
+
+----------
+
+## YAML configuration
+
+The YAML file unlocks the features that cannot be expressed with flat environment variables: named instances, per-tag policy blocks with independent timeouts, the full action vocabulary, and the health-check/database knobs.
+
+[`example.yaml`](example.yaml) in this repository is the canonical, fully commented reference for the schema.
+
+### File location
+
+The script reads `CONFIG_FILE`, defaulting to **`/data/config.yaml`**. The default deliberately points outside the application directory so Docker users can mount a volume without rebuilding the image:
+
+``` yaml
+services:
+  arr-stalled-handler:
+    image: ghcr.io/avargaskun/arrstalledhandler:latest
+    volumes:
+      - ./config.yaml:/data/config.yaml:ro
+```
+
+-   **Missing file** — not an error. The script runs in pure environment mode.
+-   **Present but invalid** — fatal. Every validation problem is logged with its field path and the script exits with status `1`. It never silently falls back to the environment when a file exists but is broken.
+
+Unknown keys are errors, so typos are caught at startup rather than silently ignored.
+
+### Precedence
+
+| Setting | YAML key | Environment fallback |
+|---|---|---|
+| *arr instances | `arrApps` | `RADARR_URL`/`RADARR_API_KEY`, `SONARR_*`, `LIDARR_*`, `READARR_*` |
+| Download client | `downloaders` | `QBITTORRENT_URL`/`_USERNAME`/`_PASSWORD` |
+| Policies | `watchers` | `STALLED_TIMEOUT`, `STALLED_ACTION`, `IGNORE_TORRENT_TAGS` |
+| Poll interval | `runInterval` | `RUN_INTERVAL` |
+| Debug logging | `log.verbose` | `VERBOSE` |
+| Metadata detection | `countDownloadingMetadataAsStalled` | `COUNT_DOWNLOADING_METADATA_AS_STALLED` |
+| Health check | `healthCheck.enabled` / `healthCheck.port` | — (YAML only) |
+| Database file | `dbFile` | — (YAML only) |
+
+Two different granularities apply:
+
+-   **The three list sections are section-level.** If `arrApps` is present, *all* `*_URL`/`*_API_KEY` variables are ignored — you cannot define one instance in YAML and another in the environment. The same holds for `downloaders` and `watchers`.
+-   **Scalars are key-level.** Omit `runInterval` from the file and `RUN_INTERVAL` still applies; set it in the file and the variable is ignored.
+
+An empty list (`arrApps: []`) is an error, not "fall back to the environment" — omit the key entirely for that.
+
+### Durations
+
+`runInterval` and `watchers[].stalledTimeout` accept either a plain number of seconds or a compound value:
+
+| Value | Seconds |
+|---|---|
+| `90` or `"90"` | 90 |
+| `45s` | 45 |
+| `5m` | 300 |
+| `1h30m` | 5400 |
+| `2d` | 172800 |
+
+Units must appear in `d h m s` order, at least one component is required, and the result must be greater than zero. Floats, negatives and ISO 8601 are rejected. Bare integers still mean seconds, so existing `STALLED_TIMEOUT=3600` / `RUN_INTERVAL=300` values keep working.
+
+### Watchers
+
+Watchers replace the single global timeout/action pair with an ordered list of policy blocks. For every stalled queue item the list is walked top to bottom and **the first matching block wins**; matching is redone every cycle, so retagging a torrent takes effect on the next run.
+
+``` yaml
+watchers:
+  - name: seeding-protection
+    tags: [keep, private]     # OR-matched, case-insensitive
+    action: IGNORE
+  - name: slow-trackers
+    tags: [slow]
+    stalledTimeout: 12h
+    action: REMOVE
+  - name: default             # no tags = catch-all
+    stalledTimeout: 1h
+    action: REMOVE_AND_BLOCKLIST_SEARCH
+```
+
+Matching rules:
+
+-   **A block with no `tags` matches everything.** Anything listed after it is unreachable.
+-   **Tags are OR-matched and compared case-insensitively.** A torrent tagged `Keep` matches `tags: [keep]`.
+-   **Tag matching needs qBittorrent.** A tagged block can only match a queue item whose download client is qBittorrent while a downloader is configured; every other item falls straight through to the next block. A startup warning is logged when watchers declare tags but no downloader exists.
+-   **Tags are fetched at most once per item per cycle**, only when a tagged block is actually reached.
+-   **If the tag lookup fails, the item is skipped for that cycle** with a warning and retried next time. It is deliberately *not* matched against later untagged blocks — applying a destructive default to a download the user may have tagged for protection is exactly the failure this avoids. (A torrent qBittorrent simply doesn't know about is a successful lookup returning no tags, so it does fall through.)
+-   **An implicit catch-all is appended** (`1h` / `REMOVE_AND_BLOCKLIST_SEARCH`) unless your last block is already a catch-all, guaranteeing every item matches something. To leave untagged downloads alone, end the list with an explicit catch-all using `action: IGNORE`.
+-   **`IGNORE` matches make no API call and no database write.** A pre-existing tracking row is left in place, so if the item later stops matching an `IGNORE` block its original detection time still applies.
+-   **The timeout compared against is the matched block's** `stalledTimeout`, not a global value.
+
+### Actions (dispositions)
+
+The action is the set of query parameters sent to the *arr queue `DELETE` endpoint:
+
+| Action | `removeFromClient` | `changeCategory` | `blocklist` | `skipRedownload` | Explicit search |
+|---|---|---|---|---|---|
+| `REMOVE` | true | false | false | false | no |
+| `REMOVE_AND_BLOCKLIST` | true | false | true | true | no |
+| `REMOVE_AND_BLOCKLIST_SEARCH` | true | false | true | false | yes |
+| `CHANGE_CATEGORY` | false | true | false | false | no |
+| `CHANGE_CATEGORY_AND_BLOCKLIST` | false | true | true | true | no |
+| `CHANGE_CATEGORY_AND_BLOCKLIST_SEARCH` | false | true | true | false | yes |
+| `KEEP` | false | false | false | false | no |
+| `KEEP_AND_BLOCKLIST` | false | false | true | true | no |
+| `KEEP_AND_BLOCKLIST_SEARCH` | false | false | true | false | yes |
+| `IGNORE` | *no API call at all* | | | | no |
+
+`REMOVE_AND_BLOCKLIST_SEARCH` is the default everywhere. Names are parsed case-insensitively, and the legacy `STALLED_ACTION` values map onto them: `REMOVE` → `REMOVE`, `BLOCKLIST` → `REMOVE_AND_BLOCKLIST`, `BLOCKLIST_AND_SEARCH` → `REMOVE_AND_BLOCKLIST_SEARCH`.
+
+**Explicit search** (`arrApps[].forceSearch`, default `true`): when a `*_SEARCH` action runs, the script also POSTs a Command API search — `MoviesSearch` for Radarr, `EpisodeSearch` for Sonarr. Lidarr and Readarr get no explicit search. Set `forceSearch: false` to rely on the *arr server's own auto-search (driven by `skipRedownload: false`) and avoid duplicate searches on modern versions.
+
+**`changeCategory` caveat:** Radarr and Sonarr support it on queue `DELETE` (the torrent is moved to the download client's configured post-import category). Lidarr/Readarr v1 support is unconfirmed — unknown query parameters are silently ignored, degrading the action to "remove from the queue, leave the torrent alone". The script logs a startup warning when a `CHANGE_CATEGORY*` action coexists with a Lidarr/Readarr instance, but still executes it.
+
+### Migrating from environment variables
+
+Environment-only deployments need no changes; behavior and database keys are unchanged. Three details are worth knowing:
+
+-   **Instance names are the database key.** Environment mode synthesizes the same names as before (`Radarr0`, `Sonarr1`, …). Moving an instance into `arrApps` under a new `name`, or renaming one later, resets that instance's in-flight stall timers **once** — affected downloads restart their timeout from the next detection. Tracking rows for names that are no longer configured are pruned at startup.
+-   **Lidarr/Readarr key casing was fixed.** The stalled-download flow previously tracked those instances as `lidarr0`/`readarr0` while the metadata flow used `Lidarr0`/`Readarr0`. Both now use `Lidarr0`/`Readarr0`, so Lidarr/Readarr environment users get a one-time timer reset on those rows.
+-   **`IGNORE_TORRENT_TAGS` matching is now case-insensitive.** It used to be case-sensitive. A torrent tagged `Slow` with `IGNORE_TORRENT_TAGS=slow` now *is* ignored, where before it was handled. This is treated as a bug fix.
+
+When no `watchers` section exists, the environment values are synthesized into equivalent watchers: an `IGNORE` block carrying `IGNORE_TORRENT_TAGS` (only when the variable is set), followed by a catch-all using `STALLED_TIMEOUT` and `STALLED_ACTION`.
 
 ----------
 
@@ -72,38 +205,38 @@ To disable Radarr or Sonarr; leave the URL empty in the environment. If the serv
 ### Script Workflow
 
 1.  **Initialization**:
-    
-    -   The script initializes a SQLite database (`stalled_downloads.db`) to track stalled downloads.
-    -   It fetches the current queue from Radarr and Sonarr APIs.
+
+    -   The configuration is loaded and validated; any problem is logged and the script exits.
+    -   The script initializes a SQLite database (`stalled_downloads.db` by default) to track stalled downloads, and prunes tracking rows belonging to instances that are no longer configured.
+    -   It fetches the current queue from each configured *arr instance.
 2.  **Detect Stalled Downloads**:
-    
+
     -   The script identifies stalled downloads based on the error message: `"The download is stalled with no connections"`.
     -   [Optional] The script treats downloads with the error message `"qBittorrent is downloading metadata"` as stalled.
-3.  **Check for Ignored Downloads**:
-    
-    -   If qBittorrent integration is configured, the script checks each stalled download's torrent tags.
-    -   Downloads with tags matching those in `IGNORE_TORRENT_TAGS` are skipped.
+3.  **Match a Policy**:
+
+    -   Each stalled download is matched against the [watcher list](#watchers), first match wins. Tag-based blocks require qBittorrent integration; the download's torrent tags are looked up at most once per cycle.
+    -   In environment-only mode this list is the synthesized `IGNORE_TORRENT_TAGS` block plus a `STALLED_TIMEOUT`/`STALLED_ACTION` catch-all, so behavior is unchanged.
+    -   Downloads matching an `IGNORE` policy are skipped entirely — no API call, no tracking.
 4.  **Timeout Check**:
-    
-    -   Downloads are only handled if they have been stalled longer than the configured `STALLED_TIMEOUT`.
+
+    -   Downloads are only handled once they have been stalled longer than the matched policy's `stalledTimeout`.
 5.  **Perform Configured Action**:
-    
-    -   Based on the `STALLED_ACTION` setting:
-        -   **REMOVE**: Removes the stalled download.
-        -   **BLOCKLIST**: Removes and blocklists the stalled download.
-        -   **BLOCKLIST_AND_SEARCH**: Removes, blocklists, and re-triggers a search for the movie or episodes.
+
+    -   The matched policy's [action](#actions-dispositions) determines the parameters sent to the *arr queue `DELETE` endpoint (`removeFromClient`, `changeCategory`, `blocklist`, `skipRedownload`).
+    -   For `*_SEARCH` actions, a Command API search is also triggered for the movie or episodes unless `forceSearch` is disabled.
 6.  **Logging**:
-    
+
     -   Logs detailed information about each action for visibility.
 7.  **Repeat**:
-    
-    -   When running in Docker, the script waits for the `RUN_INTERVAL` duration and repeats the process.
+
+    -   The script waits for the `runInterval` / `RUN_INTERVAL` duration and repeats the process.
 
 ----------
 
 ## Using qBittorrent Tag Integration
 
-The qBittorrent tag integration allows you to selectively ignore certain stalled downloads by applying tags in qBittorrent. This is useful for:
+The qBittorrent tag integration allows you to apply different policies to stalled downloads based on tags set in qBittorrent. With environment-only configuration this is limited to ignoring tagged downloads via `IGNORE_TORRENT_TAGS`; with a [YAML config file](#yaml-configuration) the same lookup drives the full [watcher](#watchers) list, so different tags can get different timeouts and actions. This is useful for:
 - Long-running downloads that you know will take time
 - Downloads from slow trackers that you want to keep
 - Special cases where you want manual control
@@ -134,8 +267,9 @@ The qBittorrent tag integration allows you to selectively ignore certain stalled
 ### Important Notes
 
 - Tags can be added or removed at any time - changes take effect on the next script run
-- The integration only works with qBittorrent as the download client
-- If qBittorrent is unreachable, the script continues normally without the ignore feature
+- Tag matching is case-insensitive
+- The integration only works with qBittorrent as the download client; queue items from any other client never match a tag-based rule
+- If qBittorrent is unreachable, affected downloads are skipped for that cycle with a warning and retried on the next run — they are never handled with a default policy on a failed lookup
 - qBittorrent's "Bypass authentication for clients on localhost" / "...in whitelisted IP subnets" is supported: when the Web UI bypasses authentication it answers the login request with `HTTP 204` and an empty body instead of `Ok.`, which the script accepts as a successful login
 - Multiple tags can be used for different purposes (e.g., "slow" for known slow trackers, "manual" for downloads you'll handle yourself)
 
@@ -143,7 +277,9 @@ The qBittorrent tag integration allows you to selectively ignore certain stalled
 
 ## Health Check
 
-When running in Docker, the script starts a lightweight HTTP server on port `9898` that responds to `GET /ping` with `200 OK`. This gives container orchestrators a way to verify the handler is alive, since it otherwise has no listening socket. Any other path returns `404`, and health-check requests are not logged.
+The script starts a lightweight HTTP server on port `9898` that responds to `GET /ping` with `200 OK`. This gives container orchestrators a way to verify the handler is alive, since it otherwise has no listening socket. Any other path returns `404`, and health-check requests are not logged.
+
+The port can be changed with `healthCheck.port`, and the server can be turned off entirely with `healthCheck.enabled: false`, in the [YAML config file](#yaml-configuration).
 
 **Docker Compose**
 
@@ -350,7 +486,7 @@ python3 -m venv .venv
 ./.venv/bin/pytest
 ```
 
-Coverage is measured on every run (configured in `pyproject.toml`), and the suite fails if `main.py` coverage drops below 85%. The gate applies to *any* pytest invocation, so running a subset of tests fails the threshold even when every selected test passes — disable coverage for partial runs:
+Coverage is measured on every run (configured in `pyproject.toml`) across `main.py` and `config.py`, and the suite fails if combined coverage drops below 85%. The gate applies to *any* pytest invocation, so running a subset of tests fails the threshold even when every selected test passes — disable coverage for partial runs:
 
 ``` bash
 ./.venv/bin/pytest tests/test_config.py --no-cov
@@ -362,16 +498,18 @@ CI runs the full suite in the `tests` job on every PR to `main`, alongside the D
 
 ## Logging
 
--   Logs are written to the console and are controlled by the `VERBOSE` environment variable.
--   If `VERBOSE` is set to `true`, debug-level logs are enabled. 
+-   Logs are written to the console and are controlled by the `VERBOSE` environment variable (or `log.verbose` in the config file).
+-   If verbose logging is enabled, debug-level logs are enabled.
+-   At startup the script logs which configuration source it used — the config file path, or a note that only environment variables were found.
 
 Example log output:
     
 ``` text
-INFO: Checking stalled downloads in Radarr...
-INFO: Ignoring download 'Movie.Name.2024.1080p.WEB-DL' due to torrent tag: slow
-INFO: Handling Download ID 1462067687 in Radarr (elapsed time: 400 seconds).
-INFO: Triggering search for Movie ID 770 in Radarr using Command API...
+INFO: Loaded configuration from /data/config.yaml
+INFO: Checking stalled downloads in Radarr0...
+INFO: Handling stalled Download ID 1462067687 in Radarr0 (elapsed time: 400 seconds).
+INFO: Performing action: REMOVE_AND_BLOCKLIST_SEARCH (ID: 1462067687) in Radarr0...
+INFO: Triggering search for Movie ID 770 in Radarr0 using Command API...
 INFO: Script execution completed. Sleeping for 300 seconds...
 ```
     
@@ -381,19 +519,29 @@ INFO: Script execution completed. Sleeping for 300 seconds...
 ## Troubleshooting
 
 1. **Script Not Executing Actions**:
-    -   Check if `STALLED_TIMEOUT` is too high.
+    -   Check if `STALLED_TIMEOUT` (or the matched watcher's `stalledTimeout`) is too high.
     -   Verify the stalled downloads are correctly detected via Radarr/Sonarr queues.
+    -   Enable verbose logging to see which watcher each download matched.
 
-2. **qBittorrent Integration Issues**:
+2. **Script Exits Immediately at Startup**:
+    -   Read the `ERROR` lines: each one names the offending configuration field.
+    -   A config file that exists but fails validation is fatal by design — it never falls back to environment variables.
+    -   Configuring no *arr instance at all is also fatal.
+
+3. **qBittorrent Integration Issues**:
     -   Verify qBittorrent Web UI is enabled and accessible
     -   Check username/password are correct
     -   Ensure the URL includes the correct protocol and port (e.g., `http://localhost:8080`)
     -   Check logs for connection errors
 
-3. **Downloads Not Being Ignored**:
+4. **Downloads Not Being Ignored**:
     -   Verify the torrent has the correct tag in qBittorrent
-    -   Check that the tag exactly matches one in `IGNORE_TORRENT_TAGS` (case-sensitive)
+    -   Check that the tag matches one in `IGNORE_TORRENT_TAGS` (or the watcher's `tags`); matching is case-insensitive
     -   Ensure the download client in *arr is set to qBittorrent
+    -   With a config file, remember the first matching watcher wins — a catch-all placed above a tagged block makes that block unreachable
+
+5. **Timers Reset After a Config Change**:
+    -   Tracking is keyed on the instance `name`. Renaming an instance, or moving from environment variables to `arrApps` with different names, restarts the stall timers once. See the [migration notes](#migrating-from-environment-variables).
 
 ----------
 
