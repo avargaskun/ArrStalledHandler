@@ -97,6 +97,8 @@ services:
       - ./config.yaml:/data/config.yaml:ro
 ```
 
+The shipped [`compose.yaml`](compose.yaml) pins `CONFIG_FILE` to that path in its `environment:` block rather than interpolating it, so a host path left in `.env` — useful when running `python main.py` locally — cannot reach the container and silently point it at nothing. To relocate the file, change the pin and the mount together.
+
 -   **Missing file** — not an error. The script runs in pure environment mode.
 -   **Present but invalid** — fatal. Every validation problem is logged with its field path and the script exits with status `1`. It never silently falls back to the environment when a file exists but is broken.
 

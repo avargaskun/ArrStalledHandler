@@ -12,6 +12,9 @@ services:
       - path: .env
         required: false
     environment:
+      # Pinned, not interpolated: this is the path inside the container, so it must
+      # match the volume mount below and never a host path picked up from .env.
+      CONFIG_FILE: /data/config.yaml
       RADARR_URL: "${RADARR_URL}" # Radarr URL
       RADARR_API_KEY: "${RADARR_API_KEY}" # Radarr API Key
       SONARR_URL: "${SONARR_URL}" # Sonarr URL
