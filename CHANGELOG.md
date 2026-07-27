@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/avargaskun/ArrStalledHandler/compare/v1.2.2...v1.3.0) (2026-07-27)
+
+
+### Features
+
+* add optional YAML configuration with per-tag stall policies ([#9](https://github.com/avargaskun/ArrStalledHandler/issues/9)) ([e569259](https://github.com/avargaskun/ArrStalledHandler/commit/e56925962e0033127d0ed2e959466ff8da6ef108))
+
 ## [1.2.2](https://github.com/avargaskun/ArrStalledHandler/compare/v1.2.1...v1.2.2) (2026-07-26)
 
 
