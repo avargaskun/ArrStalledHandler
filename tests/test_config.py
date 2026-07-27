@@ -671,6 +671,14 @@ def test_url_without_key_exits(tmp_path, caplog):
                  environ={"RADARR_URL": "http://a"})
 
 
+def test_url_key_mismatch_does_not_also_claim_nothing_configured(tmp_path, caplog):
+    errors = assert_exits(caplog, "RADARR_URL has 2 entries",
+                          config_path=str(tmp_path / MISSING),
+                          environ={"RADARR_URL": "http://a,http://b", "RADARR_API_KEY": "k"})
+
+    assert "no *arr instances configured" not in errors
+
+
 def test_no_instances_exits(tmp_path, caplog):
     assert_exits(caplog, "no *arr instances configured",
                  config_path=str(tmp_path / MISSING), environ={})
@@ -692,6 +700,12 @@ def test_invalid_run_interval_exits(tmp_path, caplog):
     assert_exits(caplog, "RUN_INTERVAL", "0",
                  config_path=str(tmp_path / MISSING),
                  environ={"RADARR_URL": "http://a", "RADARR_API_KEY": "k", "RUN_INTERVAL": "0"})
+
+
+def test_invalid_health_port_exits(tmp_path, caplog):
+    assert_exits(caplog, "healthCheck.port",
+                 config_path=write_yaml(tmp_path, "version: 1\nhealthCheck:\n  port: 99999\n"),
+                 environ={"RADARR_URL": "http://a", "RADARR_API_KEY": "k"})
 
 
 def test_invalid_yaml_exits(tmp_path, caplog):

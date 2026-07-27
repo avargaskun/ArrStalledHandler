@@ -8,7 +8,7 @@ import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-DB_FILE = "stalled_downloads.db"
+DB_FILE = config.DEFAULT_DB_FILE
 
 def initialize_database(db_file=DB_FILE):
     """Initialize the SQLite database for tracking stalled downloads."""
@@ -211,7 +211,7 @@ def match_watcher(item, watchers, qbit):
 
     return SKIP_ITEM
 
-def _process_queue_item(cfg, app, qbit, item, tracked):
+def _process_queue_item(cfg, app, qbit, item, tracked, kind="stalled"):
     """Apply the matching watcher's policy to one queue item."""
     download_id = str(item["id"])
     movie_id = item.get("movieId") if app.type == "radarr" else None
@@ -233,14 +233,14 @@ def _process_queue_item(cfg, app, qbit, item, tracked):
 
         logging.debug(f"Download ID {download_id} first detected: {first_detected}, elapsed: {elapsed_time} seconds.")
         if elapsed_time > watcher.stalled_timeout:
-            logging.info(f"Handling stalled Download ID {download_id} in {app.name} (elapsed time: {elapsed_time} seconds).")
+            logging.info(f"Handling {kind} download ID {download_id} in {app.name} (elapsed time: {elapsed_time} seconds).")
             perform_action(app, download_id, movie_id, episode_ids, watcher.action)
             remove_stalled_download_from_db(download_id, app.name, db_file=cfg.db_file)
         else:
-            logging.info(f"Download ID {download_id} in {app.name} is within timeout period ({elapsed_time} seconds).")
+            logging.info(f"{kind.capitalize()} download ID {download_id} in {app.name} is within timeout period ({elapsed_time} seconds).")
     else:
         add_stalled_download_to_db(download_id, datetime.now(timezone.utc), app.name, db_file=cfg.db_file)
-        logging.info(f"Adding stalled download ID {download_id} in {app.name} to the database.")
+        logging.info(f"Adding {kind} download ID {download_id} in {app.name} to the database.")
 
 def detect_stuck_metadata_downloads(cfg, app, qbit):
     """Detect downloads stuck at 'Downloading Metadata' and apply the watcher timeout logic."""
@@ -268,7 +268,7 @@ def detect_stuck_metadata_downloads(cfg, app, qbit):
 
     for item in metadata_records:
         if (item.get("errorMessage") or "").lower() == "qbittorrent is downloading metadata":
-            _process_queue_item(cfg, app, qbit, item, tracked)
+            _process_queue_item(cfg, app, qbit, item, tracked, kind="stuck metadata")
 
 def query_api_paginated(base_url, headers, params=None, page_size=50):
     """Query an API endpoint with pagination to retrieve all records."""

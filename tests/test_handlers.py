@@ -482,6 +482,24 @@ def test_metadata_and_stalled_share_db_namespace(load_main):
 
 
 @responses.activate
+def test_each_flow_logs_its_own_wording(load_main, caplog):
+    m = load_main()
+    cfg = tracked_config(m, make_config(count_metadata_as_stalled=True,
+                                        watchers=(make_watcher(action=D.REMOVE),)))
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1, error=METADATA_ERROR)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    with caplog.at_level("INFO"):
+        m.handle_stalled_downloads(cfg, APP, None)
+        m.add_stalled_download_to_db("1", ago(3700), "Radarr0", db_file=cfg.db_file)
+        m.detect_stuck_metadata_downloads(cfg, APP, None)
+
+    assert "Handling stalled download ID 1" in caplog.text
+    assert "Handling stuck metadata download ID 1" in caplog.text
+
+
+@responses.activate
 def test_metadata_flow_skips_null_error_message(load_main):
     m = load_main()
     cfg = make_config(count_metadata_as_stalled=True)

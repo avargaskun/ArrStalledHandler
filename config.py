@@ -129,7 +129,7 @@ class LogModel(_StrictModel):
 
 class HealthCheckModel(_StrictModel):
     enabled: bool = True
-    port: int = 9898
+    port: int = Field(default=DEFAULT_HEALTH_PORT, ge=1, le=65535)
 
 
 class ArrAppModel(_StrictModel):
@@ -157,7 +157,7 @@ class DownloaderModel(_StrictModel):
 class WatcherModel(_StrictModel):
     name: str
     tags: list[str] = Field(default_factory=list)
-    stalledTimeout: int = 3600
+    stalledTimeout: int = DEFAULT_STALLED_TIMEOUT
     action: QueueItemDisposition = QueueItemDisposition.REMOVE_AND_BLOCKLIST_SEARCH
 
     _check_name = field_validator("name")(_normalize_name)
@@ -453,8 +453,11 @@ def _build_config(model, environ):
 
     if model is not None and model.arrApps is not None:
         arr_apps = _arr_apps_from_model(model.arrApps)
+        arr_apps_failed = False
     else:
+        before = len(problems)
         arr_apps = _collect(problems, lambda: _arr_apps_from_env(environ), [])
+        arr_apps_failed = len(problems) > before
 
     if model is not None and model.downloaders is not None:
         downloader = _downloader_from_model(model.downloaders)
@@ -487,7 +490,8 @@ def _build_config(model, environ):
     health = model.healthCheck if model is not None else None
     db_file = model.dbFile if model is not None and model.dbFile else DEFAULT_DB_FILE
 
-    if not arr_apps:
+    # A failed build already explained itself; don't also claim nothing was configured.
+    if not arr_apps and not arr_apps_failed:
         problems.append(
             "no *arr instances configured; set RADARR_URL/SONARR_URL/LIDARR_URL/READARR_URL "
             "(with matching API keys) or define an arrApps section in the config file"
