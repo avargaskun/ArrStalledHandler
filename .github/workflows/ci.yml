@@ -35,3 +35,8 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64
           push: false
+          load: true
+          tags: arrstalledhandler:ci
+
+      - name: Verify the image has every module it imports
+        run: docker run --rm --entrypoint python arrstalledhandler:ci -c "import main"
