@@ -21,6 +21,12 @@ _ARR_TYPES = ("radarr", "sonarr", "lidarr", "readarr")
 _DIGITS_RE = re.compile(r"^[0-9]+$")
 _DURATION_RE = re.compile(r"^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
 
+# Alternation order is the mechanism: the $$ escape must win before ${...} is read as a
+# reference, and the bare ${ only matches when no closing brace follows.
+_DOLLAR_RE = re.compile(r"\$\$|\$\{([^}]*)\}|\$\{")
+# \Z, not $: Python's $ also matches before a trailing newline, so ${FOO\n} would pass.
+_VAR_SPEC_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(?::-(.*))?\Z", re.DOTALL)
+
 _UNIT_SECONDS = (86400, 3600, 60, 1)
 
 _LEGACY_ACTION_ALIASES = {
@@ -229,6 +235,65 @@ def _format_validation_errors(error):
         message = entry["msg"]
         messages.append(f"{location}: {message}" if location else message)
     return messages
+
+
+def _substitute_string(text, environ, path, problems):
+    def replace(match):
+        if match.group(0) == "$$":
+            return "$"
+
+        spec = match.group(1)
+        if spec is None:
+            problems.append(f"{path}: malformed variable reference ${{ (missing closing brace)")
+            return match.group(0)
+
+        parsed = _VAR_SPEC_RE.match(spec)
+        # A default containing ${ would silently weld a stray brace onto a resolved value.
+        if parsed is None or (parsed.group(2) is not None and "${" in parsed.group(2)):
+            problems.append(f"{path}: malformed variable reference ${{{spec}}}")
+            return match.group(0)
+
+        name, default = parsed.group(1), parsed.group(2)
+        value = environ.get(name)
+        if value is not None and value.strip():
+            return value
+        if default is not None:
+            return default
+        problems.append(
+            f"{path}: undefined variable ${{{name}}} (set it in the environment, "
+            f"or supply a default with ${{{name}:-...}})"
+        )
+        return match.group(0)
+
+    return _DOLLAR_RE.sub(replace, text)
+
+
+def _walk_substitute(node, environ, path, problems):
+    if isinstance(node, dict):
+        return {
+            key: _walk_substitute(value, environ, f"{path}.{key}" if path else str(key), problems)
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [
+            _walk_substitute(item, environ, f"{path}.{index}", problems)
+            for index, item in enumerate(node)
+        ]
+    if isinstance(node, str):
+        return _substitute_string(node, environ, path, problems)
+    return node
+
+
+def _substitute_env_vars(data, environ):
+    """Replace ${VAR} references in every string value of the parsed YAML.
+
+    Raises ConfigError carrying one message per unresolved or malformed reference.
+    """
+    problems = []
+    result = _walk_substitute(data, environ, "", problems)
+    if problems:
+        raise ConfigError(problems)
+    return result
 
 
 def _load_yaml_model(path):

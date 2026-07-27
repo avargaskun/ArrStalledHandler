@@ -892,3 +892,136 @@ arrApps:
                           environ={})
 
     assert SECRET_KEY not in errors
+
+
+# --- variable substitution engine -------------------------------------------------------
+
+def substitute(data, environ=None):
+    return config._substitute_env_vars(data, environ or {})
+
+
+def substitution_errors(data, environ=None):
+    with pytest.raises(config.ConfigError) as excinfo:
+        substitute(data, environ)
+    return excinfo.value.messages
+
+
+def test_substitute_single_reference():
+    assert substitute({"apiKey": "${KEY}"}, {"KEY": "abc"}) == {"apiKey": "abc"}
+
+
+def test_substitute_multiple_references_in_one_string():
+    result = substitute({"url": "http://${HOST}:${PORT}/x"}, {"HOST": "arr", "PORT": "7878"})
+
+    assert result == {"url": "http://arr:7878/x"}
+
+
+def test_substitute_inside_list_and_nested_levels():
+    data = {"watchers": [{"tags": ["${TAG}", "plain"], "name": "${NAME}"}]}
+
+    result = substitute(data, {"TAG": "keep", "NAME": "w1"})
+
+    assert result == {"watchers": [{"tags": ["keep", "plain"], "name": "w1"}]}
+
+
+@pytest.mark.parametrize("environ,expected", [
+    ({"VAR": "set"}, "set"),
+    ({}, "fallback"),
+    ({"VAR": ""}, "fallback"),
+    ({"VAR": "   "}, "fallback"),
+])
+def test_substitute_default_form(environ, expected):
+    assert substitute({"a": "${VAR:-fallback}"}, environ) == {"a": expected}
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("$$", "$"),
+    ("a$$b", "a$b"),
+    ("$${A}", "${A}"),
+    ("$", "$"),
+    ("$foo", "$foo"),
+    ("100$ or 50$", "100$ or 50$"),
+])
+def test_substitute_escapes_and_bare_dollars(text, expected):
+    assert substitute({"a": text}, {"A": "should-not-be-used"}) == {"a": expected}
+
+
+def test_substitute_leaves_non_string_values_unchanged():
+    data = {"port": 9898, "verbose": True, "log": None, "ratio": 1.5}
+
+    assert substitute(data, {}) == data
+
+
+def test_substitute_never_touches_mapping_keys():
+    result = substitute({"${A}": "x"}, {"A": "replaced"})
+
+    assert result == {"${A}": "x"}
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("${MISSING:-}", ""),
+    ("${MISSING:-  }", "  "),
+])
+def test_substitute_uses_supplied_default_verbatim(text, expected):
+    """A default the author typed is a value, even when empty; empty ≡ unset is env-only."""
+    assert substitute({"a": text}, {}) == {"a": expected}
+
+
+def test_substitute_preserves_raw_value_whitespace():
+    assert substitute({"password": "${P}"}, {"P": "  pw  "}) == {"password": "  pw  "}
+
+
+@pytest.mark.parametrize("environ", [{}, {"VAR": ""}, {"VAR": "   "}])
+def test_substitute_reports_unresolved_variable(environ):
+    messages = substitution_errors({"arrApps": [{"apiKey": "${VAR}"}]}, environ)
+
+    assert messages == [
+        "arrApps.0.apiKey: undefined variable ${VAR} (set it in the environment, "
+        "or supply a default with ${VAR:-...})"
+    ]
+
+
+@pytest.mark.parametrize("spec", ["", "1FOO", "FOO BAR", "FOO-BAR", "FOO\n", "foo.bar", "-"])
+def test_substitute_reports_malformed_name(spec):
+    messages = substitution_errors({"a": f"${{{spec}}}"}, {"FOO": "x"})
+
+    assert messages == [f"a: malformed variable reference ${{{spec}}}"]
+
+
+@pytest.mark.parametrize("text", ["${A", "abc${MISSING", "${A:-x"])
+def test_substitute_reports_unterminated_reference(text):
+    messages = substitution_errors({"arrApps": [{"apiKey": text}]}, {"A": "x"})
+
+    assert messages == ["arrApps.0.apiKey: malformed variable reference ${ (missing closing brace)"]
+
+
+@pytest.mark.parametrize("environ", [{}, {"A": "x", "OTHER": "zzz"}])
+def test_substitute_rejects_default_containing_a_reference(environ):
+    """${A:-${OTHER}} parses as default '${OTHER' and would resolve to 'x}' when A is set."""
+    messages = substitution_errors({"a": "${A:-${OTHER}}"}, environ)
+
+    assert messages == ["a: malformed variable reference ${A:-${OTHER}"]
+
+
+def test_substitute_accumulates_every_problem():
+    data = {
+        "arrApps": [{"apiKey": "${MISSING_ONE}"}],
+        "downloaders": [{"password": "${MISSING_TWO}"}],
+        "watchers": [{"name": "${FOO BAR}"}],
+    }
+
+    messages = substitution_errors(data, {})
+
+    assert len(messages) == 3
+    assert any("arrApps.0.apiKey" in m and "${MISSING_ONE}" in m for m in messages)
+    assert any("downloaders.0.password" in m and "${MISSING_TWO}" in m for m in messages)
+    assert any("watchers.0.name" in m and "${FOO BAR}" in m for m in messages)
+
+
+def test_substitute_does_not_re_expand_substituted_values():
+    assert substitute({"a": "${A}"}, {"A": "${B}", "B": "x"}) == {"a": "${B}"}
+
+
+def test_substitute_escaped_reference_is_not_flagged_as_unterminated():
+    """$${A} legitimately puts a ${ in the output; a post-hoc scan would flag it."""
+    assert substitute({"a": "$${A}"}, {}) == {"a": "${A}"}
