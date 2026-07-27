@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/avargaskun/ArrStalledHandler/compare/v1.3.1...v1.4.0) (2026-07-27)
+
+
+### Features
+
+* substitute ${VAR} environment references in the YAML config ([#13](https://github.com/avargaskun/ArrStalledHandler/issues/13)) ([44b6421](https://github.com/avargaskun/ArrStalledHandler/commit/44b64216768a19a0c2dc8207e14bf92c906e4260))
+
 ## [1.3.1](https://github.com/avargaskun/ArrStalledHandler/compare/v1.3.0...v1.3.1) (2026-07-27)
 
 
