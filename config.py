@@ -147,6 +147,7 @@ class ArrAppModel(_StrictModel):
 
     _check_name = field_validator("name")(_normalize_name)
     _check_url = field_validator("url")(_normalize_url)
+    _check_api_key = field_validator("apiKey")(_normalize_name)
 
 
 class DownloaderModel(_StrictModel):
@@ -296,7 +297,7 @@ def _substitute_env_vars(data, environ):
     return result
 
 
-def _load_yaml_model(path):
+def _load_yaml_model(path, environ):
     """Parse and validate a YAML config file. Returns None when the file does not exist."""
     if not os.path.exists(path):
         return None
@@ -311,6 +312,8 @@ def _load_yaml_model(path):
 
     if not isinstance(data, dict):
         raise ConfigError(f"{path}: expected a mapping at the top level")
+
+    data = _substitute_env_vars(data, environ)
 
     try:
         return YamlConfigModel.model_validate(data)
@@ -588,7 +591,7 @@ def load_config(config_path=None, environ=None):
     path = config_path or _env(environ, "CONFIG_FILE") or DEFAULT_CONFIG_PATH
 
     try:
-        model = _load_yaml_model(path)
+        model = _load_yaml_model(path, environ)
         if model is None:
             logging.info(f"No config file at {path}; using environment variables only")
         else:

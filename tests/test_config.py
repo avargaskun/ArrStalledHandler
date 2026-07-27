@@ -150,7 +150,7 @@ FULL_YAML = """
 
 
 def test_full_config_parses(tmp_path):
-    model = config._load_yaml_model(write_yaml(tmp_path, FULL_YAML))
+    model = config._load_yaml_model(write_yaml(tmp_path, FULL_YAML), {})
 
     assert model.version == 1
     assert model.runInterval == 300
@@ -182,7 +182,7 @@ def test_full_config_parses(tmp_path):
 
 
 def test_minimal_config_leaves_sections_absent(tmp_path):
-    model = config._load_yaml_model(write_yaml(tmp_path, "version: 1\n"))
+    model = config._load_yaml_model(write_yaml(tmp_path, "version: 1\n"), {})
 
     assert model.arrApps is None
     assert model.downloaders is None
@@ -195,28 +195,28 @@ def test_minimal_config_leaves_sections_absent(tmp_path):
 
 
 def test_missing_file_returns_none(tmp_path):
-    assert config._load_yaml_model(str(tmp_path / "nope.yaml")) is None
+    assert config._load_yaml_model(str(tmp_path / "nope.yaml"), {}) is None
 
 
 def test_healthcheck_defaults(tmp_path):
     model = config._load_yaml_model(write_yaml(tmp_path, """
         version: 1
         healthCheck: {}
-    """))
+    """), {})
 
     assert model.healthCheck.enabled is True
     assert model.healthCheck.port == 9898
 
 
 def test_run_interval_accepts_bare_seconds(tmp_path):
-    model = config._load_yaml_model(write_yaml(tmp_path, "version: 1\nrunInterval: 90\n"))
+    model = config._load_yaml_model(write_yaml(tmp_path, "version: 1\nrunInterval: 90\n"), {})
 
     assert model.runInterval == 90
 
 
 def assert_config_error(tmp_path, text, *expected_fragments):
     with pytest.raises(config.ConfigError) as excinfo:
-        config._load_yaml_model(write_yaml(tmp_path, text))
+        config._load_yaml_model(write_yaml(tmp_path, text), {})
 
     joined = " | ".join(excinfo.value.messages)
     for fragment in expected_fragments:
@@ -387,7 +387,7 @@ def test_multiple_errors_reported(tmp_path):
 
 
 def test_explicit_null_run_interval_stays_none(tmp_path):
-    model = config._load_yaml_model(write_yaml(tmp_path, "version: 1\nrunInterval:\n"))
+    model = config._load_yaml_model(write_yaml(tmp_path, "version: 1\nrunInterval:\n"), {})
 
     assert model.runInterval is None
 
@@ -397,7 +397,7 @@ def test_unreadable_path_is_error(tmp_path):
     directory.mkdir()
 
     with pytest.raises(config.ConfigError) as excinfo:
-        config._load_yaml_model(str(directory))
+        config._load_yaml_model(str(directory), {})
 
     assert "could not be read" in excinfo.value.messages[0]
 
@@ -1025,3 +1025,193 @@ def test_substitute_does_not_re_expand_substituted_values():
 def test_substitute_escaped_reference_is_not_flagged_as_unterminated():
     """$${A} legitimately puts a ${ in the output; a post-hoc scan would flag it."""
     assert substitute({"a": "$${A}"}, {}) == {"a": "${A}"}
+
+
+# --- variable substitution through load_config -------------------------------------------
+
+SUBSTITUTED_YAML = """
+    version: 1
+    arrApps:
+      - type: radarr
+        name: anime
+        url: ${ARR_HOST}:7878
+        apiKey: ${ANIME_RADARR_API_KEY}
+    downloaders:
+      - type: qbittorrent
+        name: box
+        url: http://qbit:8080
+        username: admin
+        password: ${QB_PASSWORD}
+    watchers:
+      - name: protected
+        tags: ["${KEEP_TAG}"]
+        action: IGNORE
+      - name: catch-all
+        action: KEEP
+"""
+
+SUBSTITUTED_ENV = {
+    "ARR_HOST": "radarr.local",
+    "ANIME_RADARR_API_KEY": "anime-key",
+    "QB_PASSWORD": "  p@ss  ",
+    "KEEP_TAG": "keep",
+}
+
+
+def test_load_config_substitutes_every_section(tmp_path):
+    cfg = load(tmp_path, dict(SUBSTITUTED_ENV), SUBSTITUTED_YAML)
+
+    app, = cfg.arr_apps
+    assert (app.url, app.api_key) == ("http://radarr.local:7878", "anime-key")
+    assert cfg.downloader.password == "  p@ss  "
+    assert cfg.watchers[0].tags == ("keep",)
+
+
+def test_unquoted_reference_in_flow_collection_is_invalid_yaml(tmp_path, caplog):
+    """`{` is a YAML flow indicator: tags: [${TAG}] never reaches substitution."""
+    errors = assert_exits(caplog, "invalid YAML",
+                          config_path=write_yaml(tmp_path, """
+                              version: 1
+                              watchers:
+                                - name: w
+                                  tags: [${TAG}]
+                          """),
+                          environ={"RADARR_URL": "http://a", "RADARR_API_KEY": "k", "TAG": "keep"})
+
+    assert "undefined variable" not in errors
+
+
+def test_substituted_values_coerce_to_non_string_fields(tmp_path):
+    cfg = load(tmp_path, {
+        "RADARR_URL": "http://a", "RADARR_API_KEY": "k",
+        "HEALTH_PORT": "9898", "VERBOSE_FLAG": "true",
+        "TIMEOUT": "1h", "INTERVAL": "5m",
+    }, """
+        version: 1
+        runInterval: ${INTERVAL}
+        log:
+          verbose: ${VERBOSE_FLAG}
+        healthCheck:
+          port: ${HEALTH_PORT}
+        watchers:
+          - name: only
+            stalledTimeout: ${TIMEOUT}
+            action: KEEP
+    """)
+
+    assert cfg.health_port == 9898
+    assert cfg.verbose is True
+    assert cfg.watchers[0].stalled_timeout == 3600
+    assert cfg.run_interval == 300
+
+
+def test_substitution_never_consults_os_environ(tmp_path, caplog, monkeypatch):
+    monkeypatch.setenv("SECRET", "leaked")
+
+    errors = assert_exits(caplog, "arrApps.0.apiKey", "${SECRET}",
+                          config_path=write_yaml(tmp_path, """
+                              version: 1
+                              arrApps:
+                                - type: radarr
+                                  name: a
+                                  url: localhost:7878
+                                  apiKey: ${SECRET}
+                          """),
+                          environ={})
+
+    assert "leaked" not in errors
+
+
+@pytest.mark.parametrize("value", ['a: b #c "d"', "line1\nline2", "key: [not, a, list]"])
+def test_substituted_value_cannot_corrupt_document_structure(tmp_path, value):
+    cfg = load(tmp_path, {"KEY": value}, """
+        version: 1
+        arrApps:
+          - type: radarr
+            name: a
+            url: localhost:7878
+            apiKey: ${KEY}
+    """)
+
+    assert cfg.arr_apps[0].api_key == value
+
+
+def test_undefined_variable_exits_naming_variable_and_path(tmp_path, caplog):
+    assert_exits(caplog, "arrApps.0.apiKey", "${ANIME_RADARR_API_KEY}", "undefined variable",
+                 config_path=write_yaml(tmp_path, SUBSTITUTED_YAML),
+                 environ=dict(SUBSTITUTED_ENV, ANIME_RADARR_API_KEY=""))
+
+
+def test_every_bad_reference_across_sections_is_logged(tmp_path, caplog):
+    errors = assert_exits(caplog, "arrApps.0.apiKey", "downloaders.0.password", "watchers.0.tags.0",
+                          config_path=write_yaml(tmp_path, SUBSTITUTED_YAML),
+                          environ={"ARR_HOST": "radarr.local"})
+
+    assert errors.count("|") >= 2
+
+
+def test_unterminated_reference_is_not_accepted_as_a_literal_key(tmp_path, caplog):
+    errors = assert_exits(caplog, "arrApps.0.apiKey", "malformed variable reference",
+                          config_path=write_yaml(tmp_path, """
+                              version: 1
+                              arrApps:
+                                - type: radarr
+                                  name: a
+                                  url: localhost:7878
+                                  apiKey: ${RADARR_API_KEY
+                          """),
+                          environ={"RADARR_API_KEY": "k"})
+
+    assert "missing closing brace" in errors
+
+
+@pytest.mark.parametrize("api_key", ['""', '"${MISSING:-}"'])
+def test_empty_api_key_is_rejected(tmp_path, caplog, api_key):
+    """${MISSING:-} substitutes cleanly to ''; the rejection comes from the apiKey validator."""
+    errors = assert_exits(caplog, "arrApps.0.apiKey",
+                          config_path=write_yaml(tmp_path, f"""
+                              version: 1
+                              arrApps:
+                                - type: radarr
+                                  name: a
+                                  url: localhost:7878
+                                  apiKey: {api_key}
+                          """),
+                          environ={})
+
+    assert "undefined variable" not in errors
+
+
+def test_empty_password_stays_expressible(tmp_path):
+    cfg = load(tmp_path, {"RADARR_URL": "http://a", "RADARR_API_KEY": "k"}, """
+        version: 1
+        downloaders:
+          - type: qbittorrent
+            name: box
+            url: http://qbit:8080
+            username: admin
+            password: "${QB_PASSWORD:-}"
+    """)
+
+    assert cfg.downloader.password == ""
+
+
+def test_config_without_references_is_unaffected(tmp_path):
+    """FULL_YAML contains no ${...}; substitution must leave it byte-for-byte equivalent."""
+    cfg = load(tmp_path, {"RADARR_API_KEY": "should-be-ignored"}, FULL_YAML)
+
+    assert [(a.name, a.url, a.api_key) for a in cfg.arr_apps] == [
+        ("anime", "http://localhost:7878", "xxxyyyzzz"),
+        ("shows", "https://sonarr.example.com", "aaabbbccc"),
+    ]
+    assert cfg.downloader == config.Downloader("default", "http://localhost:9999", "admin", "abcd")
+    assert cfg.watchers[0].tags == ("keep", "private")
+    assert cfg.run_interval == 300
+
+
+def test_env_only_values_are_never_interpolated(tmp_path):
+    cfg = load(tmp_path, {"RADARR_URL": "http://a", "RADARR_API_KEY": "${NOT_A_REFERENCE}",
+                          "QBITTORRENT_URL": "http://q", "QBITTORRENT_PASSWORD": "${MISSING"})
+
+    assert cfg.arr_apps[0].api_key == "${NOT_A_REFERENCE}"
+    assert cfg.downloader.password == "${MISSING"
