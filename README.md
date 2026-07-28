@@ -606,7 +606,7 @@ INFO: Script execution completed. Sleeping for 300 seconds...
 
 1. **Script Not Executing Actions**:
     -   Check if `STALLED_TIMEOUT` (or the matched watcher's `stalledTimeout`) is too high.
-    -   The download may be recovering briefly between polls. Any poll that does not see it stalled restarts its timer, so a download that flaps more often than `stalledTimeout` is never actioned. Enable verbose logging and look for `Stopped tracking ... recovered download(s)` appearing repeatedly for the same download; lowering `stalledTimeout` below the gap between its recoveries makes it actionable again.
+    -   The download may be recovering briefly between polls. Any poll that does not see it stalled restarts its timer, so a download that flaps more often than `stalledTimeout` is never actioned. Look for `Stopped tracking ... recovered download(s)` appearing repeatedly in the logs — enable verbose logging to see which downloads those are; lowering `stalledTimeout` below the gap between its recoveries makes it actionable again.
     -   Verify the stalled downloads are correctly detected via Radarr/Sonarr queues.
     -   Enable verbose logging to see which watcher each download matched.
 
