@@ -283,22 +283,94 @@ def test_qbittorrent_named_client_of_another_implementation_is_not_matched(load_
 
 
 @responses.activate
-def test_download_client_lookup_failure_falls_back_to_name_match(load_main, caplog):
+def test_download_client_lookup_failure_skips_item(load_main, caplog):
     m = load_main()
+    first_detected = ago(3700)
     cfg = tracked_config(m, make_config(watchers=(
-        make_watcher("tagged", tags=["slow"], action=D.IGNORE),
+        make_watcher("tagged", tags=["keep"], action=D.IGNORE),
         make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
-    )))
-    responses.get(DOWNLOAD_CLIENT_URL, status=500)
+    )), first_detected=first_detected)
+    responses.get(DOWNLOAD_CLIENT_URL, status=503)
     responses.post(LOGIN_URL, body="Ok.")
-    responses.get(INFO_URL, json=[{"tags": "slow"}])
     qbit = m.QbitClient(QBIT, "admin", "pw")
     responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
 
     m.handle_stalled_downloads(cfg, APP, qbit)
 
     assert calls("DELETE") == []
-    assert any("falling back" in r.message for r in caplog.records)
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {"1": first_detected}
+    assert any("skipped this cycle" in r.message for r in caplog.records)
+
+
+@responses.activate
+def test_download_client_lookup_failure_still_honours_an_untagged_first_watcher(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+        make_watcher("tagged", tags=["keep"], action=D.IGNORE),
+    )))
+    responses.get(DOWNLOAD_CLIENT_URL, status=503)
+    qbit = qbit_client(m, [])
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    assert query("DELETE") == BLOCKLIST_PARAMS
+
+
+@responses.activate
+def test_malformed_download_client_response_skips_item(load_main, caplog):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["keep"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    responses.get(DOWNLOAD_CLIENT_URL, json={"error": "not authorised"})
+    responses.post(LOGIN_URL, body="Ok.")
+    qbit = m.QbitClient(QBIT, "admin", "pw")
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    assert calls("DELETE") == []
+    assert any("skipped this cycle" in r.message for r in caplog.records)
+
+
+@responses.activate
+def test_no_qbittorrent_client_configured_warns(load_main, caplog):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["keep"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    qbit = qbit_client(m, [], clients=[{"name": "Deluge", "implementation": "Deluge"}])
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    assert query("DELETE") == BLOCKLIST_PARAMS
+    assert any("No qBittorrent download client" in r.message for r in caplog.records)
+
+
+@responses.activate
+def test_metadata_flow_matches_a_renamed_qbittorrent_client(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(count_metadata_as_stalled=True, watchers=(
+        make_watcher("tagged", tags=["keep"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    qbit = qbit_client(m, ["keep"],
+                       clients=[{"name": "Seedbox", "implementation": "QBittorrent"}])
+    responses.get(QUEUE_URL, json=queue_page([queue_item(
+        item_id=1, error=METADATA_ERROR, download_client="Seedbox")]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.detect_stuck_metadata_downloads(cfg, APP, qbit)
+
+    assert calls("DELETE") == []
+    assert len(info_calls()) == 1
 
 
 @responses.activate
@@ -356,6 +428,7 @@ def test_tag_lookup_failure_skips_item(load_main, caplog):
         make_watcher("tagged", tags=["slow"], action=D.IGNORE),
         make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
     )), first_detected=first_detected)
+    responses.get(DOWNLOAD_CLIENT_URL, json=QBIT_CLIENT)
     responses.post(LOGIN_URL, body="Ok.")
     responses.get(INFO_URL, status=500)
     qbit = m.QbitClient(QBIT, "admin", "pw")
@@ -515,7 +588,7 @@ def test_match_watcher_without_catch_all_skips_item(load_main):
     m = load_main()
     watchers = (make_watcher("tagged", tags=["slow"], action=D.REMOVE),)
 
-    assert m.match_watcher(queue_item(), watchers, None) is m.SKIP_ITEM
+    assert m.match_watcher(queue_item(), watchers, None, None) is m.SKIP_ITEM
 
 
 # --- metadata flow ----------------------------------------------------------

@@ -239,7 +239,7 @@ Matching rules:
 -   **A block with no `tags` matches everything.** Anything listed after it is unreachable.
 -   **Tags are OR-matched and compared case-insensitively.** A torrent tagged `Keep` matches `tags: [keep]`.
 -   **Tag matching needs qBittorrent.** A tagged block can only match a queue item whose download client is qBittorrent while a downloader is configured; every other item falls straight through to the next block. A startup warning is logged when watchers declare tags but no downloader exists.
--   **Which clients count as qBittorrent is read from the *arr itself.** Once per cycle (and only when some block declares tags) the script calls the *arr's `downloadclient` endpoint and treats every client whose *implementation* is qBittorrent as a match, whatever you named it — so a client called `Seedbox` works. If that call fails, it falls back to matching download-client *names* containing "qbittorrent" and logs a warning.
+-   **Which clients count as qBittorrent is read from the *arr itself.** Once per queue scan (and only when some block declares tags) the script calls the *arr's `downloadclient` endpoint and treats every client whose *implementation* is qBittorrent as a match, whatever you named it — so a client called `Seedbox` works. **If that call fails, the *arr's downloads that need tag matching are skipped for the cycle** with a warning and retried next time, exactly as for a failed tag lookup — they are never handled with a default policy on incomplete information. A warning is also logged when the *arr has no qBittorrent client at all, since no tagged block can match it.
 -   **Tags are fetched at most once per item per cycle**, only when a tagged block is actually reached.
 -   **If the tag lookup fails, the item is skipped for that cycle** with a warning and retried next time. It is deliberately *not* matched against later untagged blocks — applying a destructive default to a download the user may have tagged for protection is exactly the failure this avoids. (A torrent qBittorrent simply doesn't know about is a successful lookup returning no tags, so it does fall through.)
 -   **An implicit catch-all is appended** (`1h` / `REMOVE_AND_BLOCKLIST_SEARCH`) unless your last block is already a catch-all, guaranteeing every item matches something. To leave untagged downloads alone, end the list with an explicit catch-all using `action: IGNORE`.
@@ -620,7 +620,7 @@ INFO: Script execution completed. Sleeping for 300 seconds...
 4. **Downloads Not Being Ignored**:
     -   Verify the torrent has the correct tag in qBittorrent
     -   Check that the tag matches one in `IGNORE_TORRENT_TAGS` (or the watcher's `tags`); matching is case-insensitive
-    -   Ensure the download client in *arr is a qBittorrent client (any name is fine — it is matched on implementation). If the *arr's `downloadclient` endpoint is unreachable the script logs a warning and falls back to matching names containing "qbittorrent"
+    -   Ensure the download client in *arr is a qBittorrent client (any name is fine — it is matched on implementation). If the *arr's `downloadclient` endpoint is unreachable the script logs a warning and skips that instance's tag-matched downloads until it recovers
     -   With a config file, remember the first matching watcher wins — a catch-all placed above a tagged block makes that block unreachable
 
 5. **Timers Reset After a Config Change**:
