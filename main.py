@@ -329,7 +329,12 @@ def detect_stuck_metadata_downloads(cfg, app, qbit):
                                 kind="stuck metadata")
 
 def query_api_paginated(base_url, headers, params=None, page_size=50):
-    """Query an API endpoint with pagination to retrieve all records."""
+    """Query an API endpoint with pagination to retrieve all records.
+
+    Returns None when any page failed, was malformed, or came up short of the reported
+    total — a partial view must never be mistaken for a complete one — [] when the
+    endpoint is genuinely empty, and the full record list otherwise.
+    """
     all_records = []
     page = 1  # Start with the first page
     total_records = None  # Will be set from the API response
@@ -343,11 +348,11 @@ def query_api_paginated(base_url, headers, params=None, page_size=50):
 
         if response is None:
             logging.error(f"API returned None for page {page}. Exiting pagination.")
-            break
+            return None
 
         if not isinstance(response, dict) or "records" not in response:
             logging.error(f"Unexpected response from API: {response}")
-            break
+            return None
 
         # Fetch the records and total number of records
         records = response.get("records", [])
@@ -356,6 +361,10 @@ def query_api_paginated(base_url, headers, params=None, page_size=50):
         logging.debug(f"Page {page}: Retrieved {len(records)} records. Total so far: {len(all_records)} / {total_records}")
 
         if not records:
+            if total_records and len(all_records) < total_records:
+                logging.error(f"API reported {total_records} records but delivered {len(all_records)}; "
+                              "treating the read as incomplete.")
+                return None
             logging.debug(f"No more records found on page {page}. Completed pagination.")
             break
 

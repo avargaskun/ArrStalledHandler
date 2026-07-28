@@ -93,26 +93,47 @@ def test_paginated_multiple_pages(load_main):
 def test_paginated_stops_on_empty_page(load_main):
     m = load_main({})
     records = [{"id": 1}]
-    responses.get(URL, json=queue_page(records, total=99))
-    responses.get(URL, json=queue_page([], total=99))
+    responses.get(URL, json=queue_page(records, total=0))
+    responses.get(URL, json=queue_page([], total=0))
 
     assert m.query_api_paginated(URL, HEADERS) == records
     assert len(responses.calls) == 2
 
 
 @responses.activate
-def test_paginated_stops_on_none_response(load_main):
+def test_paginated_returns_none_on_short_delivery(load_main):
+    m = load_main({})
+    records = [{"id": 1}]
+    responses.get(URL, json=queue_page(records, total=99))
+    responses.get(URL, json=queue_page([], total=99))
+
+    assert m.query_api_paginated(URL, HEADERS) is None
+
+
+@responses.activate
+def test_paginated_returns_empty_list_for_empty_queue(load_main):
+    m = load_main({})
+    responses.get(URL, json=queue_page([], total=0))
+
+    result = m.query_api_paginated(URL, HEADERS)
+
+    assert result == []
+    assert result is not None
+
+
+@responses.activate
+def test_paginated_returns_none_on_page_failure(load_main):
     m = load_main({})
     records = [{"id": 1}]
     responses.get(URL, json=queue_page(records, total=99))
     responses.get(URL, status=500)
 
-    assert m.query_api_paginated(URL, HEADERS) == records
+    assert m.query_api_paginated(URL, HEADERS) is None
 
 
 @responses.activate
-def test_paginated_stops_on_malformed_response(load_main):
+def test_paginated_returns_none_on_malformed_response(load_main):
     m = load_main({})
     responses.get(URL, json={})
 
-    assert m.query_api_paginated(URL, HEADERS) == []
+    assert m.query_api_paginated(URL, HEADERS) is None
