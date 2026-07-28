@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 
@@ -132,4 +133,108 @@ def test_prune_with_no_configured_names_clears_table(load_main, tmp_path):
     m.add_stalled_download_to_db("1", datetime.now(timezone.utc), "Radarr0", db_file=db)
 
     assert m.prune_orphaned_services(db, []) == 1
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=db) == {}
+
+
+def test_reconcile_removes_unseen_rows(load_main, tmp_path):
+    m = load_main({})
+    db = str(tmp_path / "reconcile.db")
+    m.initialize_database(db_file=db)
+
+    now = datetime.now(timezone.utc)
+    for download_id in ("1", "2", "3"):
+        m.add_stalled_download_to_db(download_id, now, "Radarr0", db_file=db)
+
+    assert m.reconcile_tracked_downloads("Radarr0", {"1", "2"}, db_file=db) == 1
+    assert sorted(m.get_stalled_downloads_from_db("Radarr0", db_file=db)) == ["1", "2"]
+
+
+def test_reconcile_keeps_everything_when_all_seen(load_main, tmp_path, caplog):
+    m = load_main({})
+    db = str(tmp_path / "reconcile.db")
+    m.initialize_database(db_file=db)
+
+    now = datetime.now(timezone.utc)
+    m.add_stalled_download_to_db("1", now, "Radarr0", db_file=db)
+    m.add_stalled_download_to_db("2", now, "Radarr0", db_file=db)
+
+    with caplog.at_level(logging.INFO):
+        assert m.reconcile_tracked_downloads("Radarr0", {"1", "2"}, db_file=db) == 0
+
+    assert sorted(m.get_stalled_downloads_from_db("Radarr0", db_file=db)) == ["1", "2"]
+    assert "Stopped tracking" not in caplog.text
+
+
+def test_reconcile_with_empty_seen_set_clears_service(load_main, tmp_path):
+    m = load_main({})
+    db = str(tmp_path / "reconcile.db")
+    m.initialize_database(db_file=db)
+
+    now = datetime.now(timezone.utc)
+    m.add_stalled_download_to_db("1", now, "Radarr0", db_file=db)
+    m.add_stalled_download_to_db("2", now, "Radarr0", db_file=db)
+
+    assert m.reconcile_tracked_downloads("Radarr0", set(), db_file=db) == 2
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=db) == {}
+
+
+def test_reconcile_scoped_to_service(load_main, tmp_path):
+    m = load_main({})
+    db = str(tmp_path / "reconcile.db")
+    m.initialize_database(db_file=db)
+
+    now = datetime.now(timezone.utc)
+    m.add_stalled_download_to_db("7", now, "Radarr0", db_file=db)
+    m.add_stalled_download_to_db("7", now, "Sonarr0", db_file=db)
+
+    assert m.reconcile_tracked_downloads("Radarr0", set(), db_file=db) == 1
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=db) == {}
+    assert m.get_stalled_downloads_from_db("Sonarr0", db_file=db) == {"7": now}
+
+
+def test_reconcile_accepts_int_seen_ids(load_main, tmp_path):
+    m = load_main({})
+    db = str(tmp_path / "reconcile.db")
+    m.initialize_database(db_file=db)
+
+    m.add_stalled_download_to_db("1", datetime.now(timezone.utc), "Radarr0", db_file=db)
+
+    assert m.reconcile_tracked_downloads("Radarr0", {1}, db_file=db) == 0
+    assert list(m.get_stalled_downloads_from_db("Radarr0", db_file=db)) == ["1"]
+
+
+def test_reconcile_logs_count(load_main, tmp_path, caplog):
+    m = load_main({})
+    db = str(tmp_path / "reconcile.db")
+    m.initialize_database(db_file=db)
+
+    now = datetime.now(timezone.utc)
+    m.add_stalled_download_to_db("1", now, "Radarr0", db_file=db)
+    m.add_stalled_download_to_db("2", now, "Radarr0", db_file=db)
+
+    with caplog.at_level(logging.INFO):
+        assert m.reconcile_tracked_downloads("Radarr0", {"1"}, db_file=db) == 1
+    assert "Stopped tracking 1" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert m.reconcile_tracked_downloads("Radarr0", {"1"}, db_file=db) == 0
+    assert "Stopped tracking" not in caplog.text
+
+
+def test_reconcile_handles_more_rows_than_sqlite_variable_limit(load_main, tmp_path):
+    m = load_main({})
+    db = str(tmp_path / "reconcile.db")
+    m.initialize_database(db_file=db)
+
+    now = datetime.now(timezone.utc)
+    conn = sqlite3.connect(db)
+    conn.executemany(
+        "INSERT INTO stalled_downloads (download_id, first_detected, arr_service) VALUES (?, ?, ?)",
+        [(str(i), now.isoformat(), "Radarr0") for i in range(40_000)],
+    )
+    conn.commit()
+    conn.close()
+
+    assert m.reconcile_tracked_downloads("Radarr0", set(), db_file=db) == 40_000
     assert m.get_stalled_downloads_from_db("Radarr0", db_file=db) == {}

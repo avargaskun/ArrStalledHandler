@@ -90,6 +90,34 @@ def prune_orphaned_services(db_file, configured_names):
 
     return deleted
 
+def reconcile_tracked_downloads(arr_service, seen_ids, db_file=DB_FILE):
+    """Drop tracking rows for downloads no longer observed in a stalled state.
+
+    Every tracked row absent from seen_ids belongs to a download that recovered or
+    left the queue, so its first_detected must not survive into a future stall.
+    """
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT download_id FROM stalled_downloads WHERE arr_service = ?", (arr_service,))
+    stale = {str(row[0]) for row in cursor.fetchall()} - {str(i) for i in seen_ids}
+
+    if stale:
+        # executemany, never a single IN (...): stale is unbounded and would blow SQLITE_MAX_VARIABLE_NUMBER
+        cursor.executemany(
+            "DELETE FROM stalled_downloads WHERE arr_service = ? AND download_id = ?",
+            [(arr_service, download_id) for download_id in stale],
+        )
+        conn.commit()
+
+    conn.close()
+
+    if stale:
+        logging.info(f"Stopped tracking {len(stale)} recovered download(s) in {arr_service}.")
+        logging.debug(f"No longer stalled in {arr_service}: {sorted(stale)}")
+
+    return len(stale)
+
 def query_api(url, headers, params=None):
     """Query an API endpoint and return the JSON response."""
     try:
