@@ -377,21 +377,25 @@ def test_no_qbittorrent_client_configured_warns(load_main, caplog):
 
 
 @responses.activate
-def test_no_qbittorrent_client_warns_once_across_cycles(load_main, caplog):
+def test_no_qbittorrent_client_warns_once_per_instance(load_main, caplog):
     m = load_main()
     cfg = tracked_config(m, make_config(watchers=(
         make_watcher("tagged", tags=["keep"], action=D.IGNORE),
         make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
     )))
+    sonarr = make_app(type="sonarr", name="Sonarr0", url=RADARR, api_key="key")
     qbit = qbit_client(m, [], clients=[{"name": "Deluge", "implementation": "Deluge"}])
     responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
     responses.delete(f"{QUEUE_URL}/1", json={})
 
-    m.handle_stalled_downloads(cfg, APP, qbit)
-    m.handle_stalled_downloads(cfg, APP, qbit)
+    for _ in range(2):
+        m.handle_stalled_downloads(cfg, APP, qbit)
+        m.handle_stalled_downloads(cfg, sonarr, qbit)
 
-    warnings = [r for r in caplog.records if "No qBittorrent download client" in r.message]
-    assert len(warnings) == 1
+    warnings = [r.message for r in caplog.records if "No qBittorrent download client" in r.message]
+    assert len(warnings) == 2
+    assert sum("Radarr0" in w for w in warnings) == 1
+    assert sum("Sonarr0" in w for w in warnings) == 1
 
 
 @responses.activate
