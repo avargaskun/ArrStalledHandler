@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.2](https://github.com/avargaskun/ArrStalledHandler/compare/v1.4.1...v1.4.2) (2026-07-28)
+
+
+### Bug Fixes
+
+* identify qBittorrent download clients by implementation, not name ([#17](https://github.com/avargaskun/ArrStalledHandler/issues/17)) ([484b156](https://github.com/avargaskun/ArrStalledHandler/commit/484b15666c1ca37fc4496a927727eb62a1e6c74a))
+
 ## [1.4.1](https://github.com/avargaskun/ArrStalledHandler/compare/v1.4.0...v1.4.1) (2026-07-28)
 
 
