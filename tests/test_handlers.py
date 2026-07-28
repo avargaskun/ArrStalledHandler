@@ -10,6 +10,8 @@ from conftest import make_app, make_config, make_watcher, queue_item, queue_page
 
 RADARR = "http://radarr:7878"
 QUEUE_URL = f"{RADARR}/api/v3/queue"
+DOWNLOAD_CLIENT_URL = f"{RADARR}/api/v3/downloadclient"
+QBIT_CLIENT = [{"id": 1, "name": "qBittorrent", "implementation": "QBittorrent"}]
 QBIT = "http://qbit:8080"
 LOGIN_URL = f"{QBIT}/api/v2/auth/login"
 INFO_URL = f"{QBIT}/api/v2/torrents/info"
@@ -37,8 +39,9 @@ def ago(seconds):
     return datetime.now(timezone.utc) - timedelta(seconds=seconds)
 
 
-def qbit_client(m, tags_pages):
+def qbit_client(m, tags_pages, clients=None):
     """A QbitClient wired to mocked login + torrents/info responses (one page per lookup)."""
+    responses.get(DOWNLOAD_CLIENT_URL, json=QBIT_CLIENT if clients is None else clients)
     responses.post(LOGIN_URL, body="Ok.")
     for tags in tags_pages:
         responses.get(INFO_URL, json=[{"tags": tags}] if tags is not None else [])
@@ -244,6 +247,233 @@ def test_non_qbittorrent_item_falls_through_to_untagged_watcher(load_main):
 
 
 @responses.activate
+def test_renamed_qbittorrent_client_still_matches_tags(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["slow"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    qbit = qbit_client(m, ["slow"],
+                       clients=[{"name": "Seedbox", "implementation": "QBittorrent"}])
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1, download_client="Seedbox")]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    assert calls("DELETE") == []
+
+
+@responses.activate
+def test_qbittorrent_named_client_of_another_implementation_is_not_matched(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["slow"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    qbit = qbit_client(m, [],
+                       clients=[{"name": "qBittorrent box", "implementation": "Transmission"}])
+    responses.get(QUEUE_URL,
+                  json=queue_page([queue_item(item_id=1, download_client="qBittorrent box")]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    assert query("DELETE") == BLOCKLIST_PARAMS
+    assert info_calls() == []
+
+
+@responses.activate
+def test_download_client_lookup_failure_skips_item(load_main, caplog):
+    m = load_main()
+    first_detected = ago(3700)
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["keep"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )), first_detected=first_detected)
+    responses.get(DOWNLOAD_CLIENT_URL, status=503)
+    responses.post(LOGIN_URL, body="Ok.")
+    qbit = m.QbitClient(QBIT, "admin", "pw")
+    # A renamed client: a name-substring fallback would not recognise it and would let the
+    # item fall through to the destructive catch-all, which is the whole point of skipping.
+    responses.get(QUEUE_URL,
+                  json=queue_page([queue_item(item_id=1, download_client="Seedbox")]))
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    assert calls("DELETE") == []
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {"1": first_detected}
+    assert any("skipped this cycle" in r.message for r in caplog.records)
+
+
+@responses.activate
+def test_download_client_lookup_failure_still_honours_an_untagged_first_watcher(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+        make_watcher("tagged", tags=["keep"], action=D.IGNORE),
+    )))
+    responses.get(DOWNLOAD_CLIENT_URL, status=503)
+    responses.post(LOGIN_URL, body="Ok.")
+    qbit = m.QbitClient(QBIT, "admin", "pw")
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    assert query("DELETE") == BLOCKLIST_PARAMS
+
+
+@responses.activate
+def test_nameless_client_does_not_match_a_nameless_queue_item(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["keep"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    qbit = qbit_client(m, [], clients=[{"name": None, "implementation": "QBittorrent"}])
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1, download_client=None)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    assert query("DELETE") == BLOCKLIST_PARAMS
+    assert info_calls() == []
+
+
+@responses.activate
+def test_malformed_download_client_response_skips_item(load_main, caplog):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["keep"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    responses.get(DOWNLOAD_CLIENT_URL, json={"error": "not authorised"})
+    responses.post(LOGIN_URL, body="Ok.")
+    qbit = m.QbitClient(QBIT, "admin", "pw")
+    responses.get(QUEUE_URL,
+                  json=queue_page([queue_item(item_id=1, download_client="Seedbox")]))
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    assert calls("DELETE") == []
+    assert any("skipped this cycle" in r.message for r in caplog.records)
+
+
+@responses.activate
+def test_no_qbittorrent_client_configured_warns(load_main, caplog):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["keep"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    qbit = qbit_client(m, [], clients=[{"name": "Deluge", "implementation": "Deluge"}])
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    assert query("DELETE") == BLOCKLIST_PARAMS
+    assert any("No qBittorrent download client" in r.message for r in caplog.records)
+
+
+@responses.activate
+def test_no_qbittorrent_client_warns_once_per_instance(load_main, caplog):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["keep"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    sonarr = make_app(type="sonarr", name="Sonarr0", url=RADARR, api_key="key")
+    qbit = qbit_client(m, [], clients=[{"name": "Deluge", "implementation": "Deluge"}])
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    for _ in range(2):
+        m.handle_stalled_downloads(cfg, APP, qbit)
+        m.handle_stalled_downloads(cfg, sonarr, qbit)
+
+    warnings = [r.message for r in caplog.records if "No qBittorrent download client" in r.message]
+    assert len(warnings) == 2
+    assert sum("Radarr0" in w for w in warnings) == 1
+    assert sum("Sonarr0" in w for w in warnings) == 1
+
+
+@responses.activate
+def test_no_qbittorrent_client_warns_again_after_recovering(load_main, caplog):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["keep"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    deluge = [{"name": "Deluge", "implementation": "Deluge"}]
+    responses.get(DOWNLOAD_CLIENT_URL, json=deluge)
+    responses.get(DOWNLOAD_CLIENT_URL, json=QBIT_CLIENT)
+    responses.get(DOWNLOAD_CLIENT_URL, json=deluge)
+    responses.post(LOGIN_URL, body="Ok.")
+    responses.get(INFO_URL, json=[{"tags": ""}])
+    qbit = m.QbitClient(QBIT, "admin", "pw")
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    for _ in range(3):
+        m.handle_stalled_downloads(cfg, APP, qbit)
+
+    warnings = [r for r in caplog.records if "No qBittorrent download client" in r.message]
+    assert len(warnings) == 2
+
+
+@responses.activate
+def test_metadata_flow_matches_a_renamed_qbittorrent_client(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(count_metadata_as_stalled=True, watchers=(
+        make_watcher("tagged", tags=["keep"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    qbit = qbit_client(m, ["keep"],
+                       clients=[{"name": "Seedbox", "implementation": "QBittorrent"}])
+    responses.get(QUEUE_URL, json=queue_page([queue_item(
+        item_id=1, error=METADATA_ERROR, download_client="Seedbox")]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.detect_stuck_metadata_downloads(cfg, APP, qbit)
+
+    assert calls("DELETE") == []
+    assert len(info_calls()) == 1
+
+
+@responses.activate
+def test_download_clients_not_looked_up_without_tagged_watchers(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(make_watcher("default", action=D.REMOVE),)))
+    qbit = qbit_client(m, [])
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    assert [c for c in responses.calls if c.request.url.startswith(DOWNLOAD_CLIENT_URL)] == []
+
+
+@responses.activate
+def test_download_clients_looked_up_once_per_cycle(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["slow"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )), download_id="1")
+    m.add_stalled_download_to_db("2", ago(3700), "Radarr0", db_file=cfg.db_file)
+    qbit = qbit_client(m, ["slow", "slow"])
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1),
+                                              queue_item(item_id=2, download_id="OTHERHASH")]))
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    lookups = [c for c in responses.calls if c.request.url.startswith(DOWNLOAD_CLIENT_URL)]
+    assert len(lookups) == 1
+    assert len(info_calls()) == 2
+
+
+@responses.activate
 def test_no_downloader_falls_through_to_untagged_watcher(load_main):
     m = load_main()
     cfg = tracked_config(m, make_config(watchers=(
@@ -266,6 +496,7 @@ def test_tag_lookup_failure_skips_item(load_main, caplog):
         make_watcher("tagged", tags=["slow"], action=D.IGNORE),
         make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
     )), first_detected=first_detected)
+    responses.get(DOWNLOAD_CLIENT_URL, json=QBIT_CLIENT)
     responses.post(LOGIN_URL, body="Ok.")
     responses.get(INFO_URL, status=500)
     qbit = m.QbitClient(QBIT, "admin", "pw")
@@ -425,7 +656,7 @@ def test_match_watcher_without_catch_all_skips_item(load_main):
     m = load_main()
     watchers = (make_watcher("tagged", tags=["slow"], action=D.REMOVE),)
 
-    assert m.match_watcher(queue_item(), watchers, None) is m.SKIP_ITEM
+    assert m.match_watcher(queue_item(), watchers, None, None) is m.SKIP_ITEM
 
 
 # --- metadata flow ----------------------------------------------------------
