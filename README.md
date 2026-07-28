@@ -239,6 +239,7 @@ Matching rules:
 -   **A block with no `tags` matches everything.** Anything listed after it is unreachable.
 -   **Tags are OR-matched and compared case-insensitively.** A torrent tagged `Keep` matches `tags: [keep]`.
 -   **Tag matching needs qBittorrent.** A tagged block can only match a queue item whose download client is qBittorrent while a downloader is configured; every other item falls straight through to the next block. A startup warning is logged when watchers declare tags but no downloader exists.
+-   **Which clients count as qBittorrent is read from the *arr itself.** Once per cycle (and only when some block declares tags) the script calls the *arr's `downloadclient` endpoint and treats every client whose *implementation* is qBittorrent as a match, whatever you named it — so a client called `Seedbox` works. If that call fails, it falls back to matching download-client *names* containing "qbittorrent" and logs a warning.
 -   **Tags are fetched at most once per item per cycle**, only when a tagged block is actually reached.
 -   **If the tag lookup fails, the item is skipped for that cycle** with a warning and retried next time. It is deliberately *not* matched against later untagged blocks — applying a destructive default to a download the user may have tagged for protection is exactly the failure this avoids. (A torrent qBittorrent simply doesn't know about is a successful lookup returning no tags, so it does fall through.)
 -   **An implicit catch-all is appended** (`1h` / `REMOVE_AND_BLOCKLIST_SEARCH`) unless your last block is already a catch-all, guaranteeing every item matches something. To leave untagged downloads alone, end the list with an explicit catch-all using `action: IGNORE`.
@@ -348,7 +349,7 @@ The qBittorrent tag integration allows you to apply different policies to stalle
 
 - Tags can be added or removed at any time - changes take effect on the next script run
 - Tag matching is case-insensitive
-- The integration only works with qBittorrent as the download client; queue items from any other client never match a tag-based rule
+- The integration only works with qBittorrent as the download client; queue items from any other client never match a tag-based rule. The client is identified by its *implementation* as reported by the *arr, not by the name you gave it, so renaming it in the *arr UI is safe
 - If qBittorrent is unreachable, affected downloads are skipped for that cycle with a warning and retried on the next run — they are never handled with a default policy on a failed lookup
 - qBittorrent's "Bypass authentication for clients on localhost" / "...in whitelisted IP subnets" is supported: when the Web UI bypasses authentication it answers the login request with `HTTP 204` and an empty body instead of `Ok.`, which the script accepts as a successful login
 - Multiple tags can be used for different purposes (e.g., "slow" for known slow trackers, "manual" for downloads you'll handle yourself)
@@ -619,7 +620,7 @@ INFO: Script execution completed. Sleeping for 300 seconds...
 4. **Downloads Not Being Ignored**:
     -   Verify the torrent has the correct tag in qBittorrent
     -   Check that the tag matches one in `IGNORE_TORRENT_TAGS` (or the watcher's `tags`); matching is case-insensitive
-    -   Ensure the download client in *arr is set to qBittorrent
+    -   Ensure the download client in *arr is a qBittorrent client (any name is fine — it is matched on implementation). If the *arr's `downloadclient` endpoint is unreachable the script logs a warning and falls back to matching names containing "qbittorrent"
     -   With a config file, remember the first matching watcher wins — a catch-all placed above a tagged block makes that block unreachable
 
 5. **Timers Reset After a Config Change**:

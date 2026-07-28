@@ -111,7 +111,9 @@ watchers:
   - name: seeding-protection
     # Torrent tags to match, OR-ed and compared case-insensitively. Requires a
     # downloader and a queue item whose download client is qBittorrent; items
-    # from any other client simply fall through to the next watcher.
+    # from any other client simply fall through to the next watcher. Which
+    # clients are qBittorrent comes from the *arr's own downloadclient list
+    # (matched on implementation), so the name you gave the client is free.
     # Omit (or leave empty) to match every download — that makes the block a
     # catch-all, so anything after it is unreachable.
     # A ${VAR} reference in this inline form must be quoted — tags: ["${TAG}"].

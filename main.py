@@ -186,7 +186,36 @@ class QbitClient:
 
 SKIP_ITEM = object()
 
-def match_watcher(item, watchers, qbit):
+def qbittorrent_client_names(app):
+    """Lowercased names of the *arr's qBittorrent download clients, or None if the lookup fails."""
+    url = f"{app.url}/api/{app.api_version}/downloadclient"
+    clients = query_api(url, {"X-Api-Key": app.api_key})
+    if clients is None:
+        return None
+    return {(client.get("name") or "").lower() for client in clients
+            if (client.get("implementation") or "").lower() == "qbittorrent"}
+
+def resolve_qbittorrent_clients(app, qbit, watchers):
+    """Look up the qBittorrent client names, but only when a tagged watcher could use them."""
+    if qbit is None or not any(watcher.tags for watcher in watchers):
+        return None
+
+    names = qbittorrent_client_names(app)
+    if names is None:
+        logging.warning(
+            f"Could not list download clients for {app.name}; falling back to matching "
+            f"queue items whose download client is named like 'qBittorrent'."
+        )
+    return names
+
+def _uses_qbittorrent(item, qbit_clients):
+    """Whether the queue item's download client is qBittorrent."""
+    name = item.get('downloadClient') or ''
+    if qbit_clients is None:
+        return 'qbittorrent' in name.lower()
+    return name.lower() in qbit_clients
+
+def match_watcher(item, watchers, qbit, qbit_clients=None):
     """Return the first watcher matching the queue item, or SKIP_ITEM when tags can't be resolved."""
     item_tags = None
 
@@ -194,7 +223,7 @@ def match_watcher(item, watchers, qbit):
         if not watcher.tags:
             return watcher
 
-        if qbit is None or 'qbittorrent' not in (item.get('downloadClient') or '').lower():
+        if qbit is None or not _uses_qbittorrent(item, qbit_clients):
             continue  # tagged watchers can never match an item we cannot look up
 
         if item_tags is None:
@@ -211,13 +240,13 @@ def match_watcher(item, watchers, qbit):
 
     return SKIP_ITEM
 
-def _process_queue_item(cfg, app, qbit, item, tracked, kind="stalled"):
+def _process_queue_item(cfg, app, qbit, item, tracked, kind="stalled", qbit_clients=None):
     """Apply the matching watcher's policy to one queue item."""
     download_id = str(item["id"])
     movie_id = item.get("movieId") if app.type == "radarr" else None
     episode_ids = [item["episodeId"]] if app.type == "sonarr" and "episodeId" in item else None
 
-    watcher = match_watcher(item, cfg.watchers, qbit)
+    watcher = match_watcher(item, cfg.watchers, qbit, qbit_clients)
     if watcher is SKIP_ITEM:
         return
 
@@ -265,10 +294,12 @@ def detect_stuck_metadata_downloads(cfg, app, qbit):
         return
 
     tracked = get_stalled_downloads_from_db(app.name, db_file=cfg.db_file)
+    qbit_clients = resolve_qbittorrent_clients(app, qbit, cfg.watchers)
 
     for item in metadata_records:
         if (item.get("errorMessage") or "").lower() == "qbittorrent is downloading metadata":
-            _process_queue_item(cfg, app, qbit, item, tracked, kind="stuck metadata")
+            _process_queue_item(cfg, app, qbit, item, tracked, kind="stuck metadata",
+                                qbit_clients=qbit_clients)
 
 def query_api_paginated(base_url, headers, params=None, page_size=50):
     """Query an API endpoint with pagination to retrieve all records."""
@@ -362,9 +393,10 @@ def handle_stalled_downloads(cfg, app, qbit):
         return
 
     tracked = get_stalled_downloads_from_db(app.name, db_file=cfg.db_file)
+    qbit_clients = resolve_qbittorrent_clients(app, qbit, cfg.watchers)
     for item in queue_records:
         if (item.get("errorMessage") or "").lower() == "the download is stalled with no connections":
-            _process_queue_item(cfg, app, qbit, item, tracked)
+            _process_queue_item(cfg, app, qbit, item, tracked, qbit_clients=qbit_clients)
 
 # --- Health Check Server Logic ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
