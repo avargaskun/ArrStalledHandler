@@ -187,12 +187,18 @@ class QbitClient:
 SKIP_ITEM = object()
 LOOKUP_FAILED = object()
 
+_MISSING_CLIENT_WARNED = set()
+
 def qbittorrent_client_names(app):
-    """Lowercased names of the *arr's qBittorrent download clients, or None if the lookup fails."""
+    """Lowercased names of the *arr's qBittorrent download clients, or LOOKUP_FAILED.
+
+    Never returns None: "the lookup failed" must not be confusable with the None that
+    resolve_qbittorrent_clients uses for "no lookup was needed".
+    """
     url = f"{app.url}/api/{app.api_version}/downloadclient"
     clients = query_api(url, {"X-Api-Key": app.api_key})
     if not isinstance(clients, list):
-        return None
+        return LOOKUP_FAILED
     return {client["name"].lower() for client in clients
             if isinstance(client, dict) and client.get("name")
             and (client.get("implementation") or "").lower() == "qbittorrent"}
@@ -206,18 +212,23 @@ def resolve_qbittorrent_clients(app, qbit, watchers):
         return None
 
     names = qbittorrent_client_names(app)
-    if names is None:
+    if names is LOOKUP_FAILED:
         logging.warning(
             f"Could not list the download clients of {app.name}; its downloads that need "
             "tag matching are skipped this cycle and retried on the next run."
         )
         return LOOKUP_FAILED
 
+    # A static misconfiguration, so warn once per instance rather than every cycle.
     if not names:
-        logging.warning(
-            f"No qBittorrent download client is configured in {app.name}; "
-            "tagged watchers can never match its downloads."
-        )
+        if app.name not in _MISSING_CLIENT_WARNED:
+            _MISSING_CLIENT_WARNED.add(app.name)
+            logging.warning(
+                f"No qBittorrent download client is configured in {app.name}; "
+                "tagged watchers can never match its downloads."
+            )
+    else:
+        _MISSING_CLIENT_WARNED.discard(app.name)
     return names
 
 def _uses_qbittorrent(item, qbit_clients):

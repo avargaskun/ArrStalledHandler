@@ -377,6 +377,48 @@ def test_no_qbittorrent_client_configured_warns(load_main, caplog):
 
 
 @responses.activate
+def test_no_qbittorrent_client_warns_once_across_cycles(load_main, caplog):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["keep"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    qbit = qbit_client(m, [], clients=[{"name": "Deluge", "implementation": "Deluge"}])
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    warnings = [r for r in caplog.records if "No qBittorrent download client" in r.message]
+    assert len(warnings) == 1
+
+
+@responses.activate
+def test_no_qbittorrent_client_warns_again_after_recovering(load_main, caplog):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["keep"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    deluge = [{"name": "Deluge", "implementation": "Deluge"}]
+    responses.get(DOWNLOAD_CLIENT_URL, json=deluge)
+    responses.get(DOWNLOAD_CLIENT_URL, json=QBIT_CLIENT)
+    responses.get(DOWNLOAD_CLIENT_URL, json=deluge)
+    responses.post(LOGIN_URL, body="Ok.")
+    responses.get(INFO_URL, json=[{"tags": ""}])
+    qbit = m.QbitClient(QBIT, "admin", "pw")
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    for _ in range(3):
+        m.handle_stalled_downloads(cfg, APP, qbit)
+
+    warnings = [r for r in caplog.records if "No qBittorrent download client" in r.message]
+    assert len(warnings) == 2
+
+
+@responses.activate
 def test_metadata_flow_matches_a_renamed_qbittorrent_client(load_main):
     m = load_main()
     cfg = tracked_config(m, make_config(count_metadata_as_stalled=True, watchers=(
