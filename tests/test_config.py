@@ -740,7 +740,8 @@ def test_warns_when_tags_without_downloader(tmp_path, caplog):
 def test_no_tag_warning_when_downloader_present(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         load(tmp_path, {"RADARR_URL": "http://a", "RADARR_API_KEY": "k",
-                        "QBITTORRENT_URL": "http://q", "IGNORE_TORRENT_TAGS": "slow"})
+                        "QBITTORRENT_URL": "http://q", "IGNORE_TORRENT_TAGS": "slow"},
+             "version: 1\n")
 
     assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
 
@@ -779,6 +780,35 @@ def test_config_source_logged(tmp_path, caplog):
     with caplog.at_level(logging.INFO):
         load(tmp_path, {}, YAML_ARR)
     assert any("Loaded configuration from" in r.message for r in caplog.records)
+
+
+def test_missing_requested_config_file_warns(tmp_path, caplog):
+    missing = str(tmp_path / "nope.yaml")
+
+    with caplog.at_level(logging.INFO):
+        config.load_config(missing, environ={"RADARR_URL": "http://a", "RADARR_API_KEY": "k"})
+
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(missing in message for message in warnings)
+
+
+def test_missing_config_file_from_env_warns(tmp_path, caplog):
+    missing = str(tmp_path / "nope.yaml")
+
+    with caplog.at_level(logging.INFO):
+        config.load_config(environ={"CONFIG_FILE": missing,
+                                    "RADARR_URL": "http://a", "RADARR_API_KEY": "k"})
+
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(missing in message for message in warnings)
+
+
+def test_missing_default_config_file_stays_info(tmp_path, caplog):
+    with caplog.at_level(logging.INFO):
+        config.load_config(environ={"RADARR_URL": "http://a", "RADARR_API_KEY": "k"})
+
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+    assert any(config.DEFAULT_CONFIG_PATH in r.message for r in caplog.records)
 
 
 def test_app_config_is_frozen(tmp_path):

@@ -588,12 +588,16 @@ def load_config(config_path=None, environ=None):
     """
     if environ is None:
         environ = os.environ
-    path = config_path or _env(environ, "CONFIG_FILE") or DEFAULT_CONFIG_PATH
+    requested_path = config_path or _env(environ, "CONFIG_FILE")
+    path = requested_path or DEFAULT_CONFIG_PATH
 
     try:
         model = _load_yaml_model(path, environ)
         if model is None:
-            logging.info(f"No config file at {path}; using environment variables only")
+            # An explicitly requested file that is absent is almost always a wrong
+            # path rather than an intentional env-only run.
+            log = logging.warning if requested_path else logging.info
+            log(f"No config file at {path}; using environment variables only")
         else:
             logging.info(f"Loaded configuration from {path}")
         app_config = _build_config(model, environ)
