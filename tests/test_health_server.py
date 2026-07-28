@@ -134,6 +134,45 @@ def test_main_runs_handlers_for_each_app(load_main, monkeypatch):
     assert (qbit.url, qbit.username, qbit.password) == ("http://qbit", "u", "p")
 
 
+def test_main_reconciles_after_both_handlers(load_main, monkeypatch):
+    m = load_main({})
+    cfg = make_config(
+        arr_apps=(
+            m.config.ArrApp(type="radarr", name="Radarr0", url="http://radarr", api_key="k"),
+            m.config.ArrApp(type="sonarr", name="Sonarr0", url="http://sonarr", api_key="k"),
+        ),
+        health_enabled=False,
+    )
+    recorded = []
+    monkeypatch.setattr(m, "handle_stalled_downloads", lambda *a, **k: {"1"})
+    monkeypatch.setattr(m, "detect_stuck_metadata_downloads", lambda *a, **k: {"2"})
+    monkeypatch.setattr(m, "reconcile_tracked_downloads", lambda *a, **k: recorded.append((a, k)))
+
+    _run_main_once(m, monkeypatch, cfg)
+
+    assert [args[0] for args, _ in recorded] == ["Radarr0", "Sonarr0"]
+    assert [args[1] for args, _ in recorded] == [{"1", "2"}, {"1", "2"}]
+    assert [kwargs["db_file"] for _, kwargs in recorded] == [cfg.db_file, cfg.db_file]
+
+
+@pytest.mark.parametrize("stalled,metadata", [(None, {"2"}), ({"1"}, None)])
+def test_main_skips_reconcile_on_incomplete_view(load_main, monkeypatch, caplog, stalled, metadata):
+    import logging
+
+    m = load_main({})
+    cfg = make_config(arr_apps=(make_config().arr_apps[0],), health_enabled=False)
+    recorded = []
+    monkeypatch.setattr(m, "handle_stalled_downloads", lambda *a, **k: stalled)
+    monkeypatch.setattr(m, "detect_stuck_metadata_downloads", lambda *a, **k: metadata)
+    monkeypatch.setattr(m, "reconcile_tracked_downloads", lambda *a, **k: recorded.append((a, k)))
+
+    with caplog.at_level(logging.DEBUG):
+        _run_main_once(m, monkeypatch, cfg)
+
+    assert recorded == []
+    assert "Incomplete queue view for Radarr0" in caplog.text
+
+
 def test_main_logs_unexpected_errors(load_main, monkeypatch, caplog):
     m = load_main({})
     cfg = make_config(arr_apps=(make_config().arr_apps[0],), health_enabled=False)

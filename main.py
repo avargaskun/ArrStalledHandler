@@ -536,8 +536,13 @@ def main():
     try:
         while True:
             for app in cfg.arr_apps:
-                handle_stalled_downloads(cfg, app, qbit)
-                detect_stuck_metadata_downloads(cfg, app, qbit)
+                stalled_seen = handle_stalled_downloads(cfg, app, qbit)
+                metadata_seen = detect_stuck_metadata_downloads(cfg, app, qbit)
+
+                if stalled_seen is None or metadata_seen is None:
+                    logging.debug(f"Incomplete queue view for {app.name}; keeping all tracking timers.")
+                else:
+                    reconcile_tracked_downloads(app.name, stalled_seen | metadata_seen, db_file=cfg.db_file)
 
             logging.info(f"Script execution completed. Sleeping for {cfg.run_interval} seconds...")
             time.sleep(cfg.run_interval)

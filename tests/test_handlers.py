@@ -916,3 +916,69 @@ def test_ignored_item_still_reported_as_seen(load_main):
     assert m.handle_stalled_downloads(cfg, APP, None) == {"1"}
     assert calls("DELETE") == []
     assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {"1": first_detected}
+
+
+# --- reconciliation regression ---
+
+@responses.activate
+def test_recovered_download_gets_fresh_timer(load_main):
+    m = load_main()
+    cfg = make_config(watchers=(make_watcher(stalled_timeout=3600, action=D.REMOVE_AND_BLOCKLIST),))
+    original = ago(3700)
+    tracked_config(m, cfg, download_id="1", first_detected=original)
+
+    responses.get(QUEUE_URL, json=queue_page([]))                        # cycle 1: recovered
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))   # cycle 2: stalled again
+
+    seen = m.handle_stalled_downloads(cfg, APP, None)
+    m.reconcile_tracked_downloads("Radarr0", seen, db_file=cfg.db_file)
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {}
+
+    m.handle_stalled_downloads(cfg, APP, None)
+
+    assert calls("DELETE") == []
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file)["1"] > original
+
+
+@responses.activate
+def test_still_stalled_download_keeps_its_timer(load_main):
+    m = load_main()
+    cfg = make_config(watchers=(make_watcher(stalled_timeout=3600, action=D.REMOVE_AND_BLOCKLIST),))
+    original = ago(100)
+    tracked_config(m, cfg, download_id="1", first_detected=original)
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+
+    seen = m.handle_stalled_downloads(cfg, APP, None)
+
+    assert m.reconcile_tracked_downloads("Radarr0", seen, db_file=cfg.db_file) == 0
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {"1": original}
+
+
+@responses.activate
+def test_completed_download_row_pruned(load_main):
+    m = load_main()
+    cfg = make_config(watchers=(make_watcher(stalled_timeout=3600, action=D.REMOVE_AND_BLOCKLIST),))
+    tracked_config(m, cfg, download_id="1", first_detected=ago(100))
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=2)]))
+
+    seen = m.handle_stalled_downloads(cfg, APP, None)
+
+    assert m.reconcile_tracked_downloads("Radarr0", seen, db_file=cfg.db_file) == 1
+    assert list(m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file)) == ["2"]
+
+
+@responses.activate
+def test_flapping_download_is_never_actioned(load_main):
+    m = load_main()
+    cfg = make_config(watchers=(make_watcher(stalled_timeout=0, action=D.REMOVE_AND_BLOCKLIST),))
+    m.initialize_database(cfg.db_file)
+    responses.delete(f"{QUEUE_URL}/1", json={})
+    for records in ([queue_item(item_id=1)], [], [queue_item(item_id=1)], []):
+        responses.get(QUEUE_URL, json=queue_page(records))
+
+    for _ in range(4):
+        seen = m.handle_stalled_downloads(cfg, APP, None)
+        m.reconcile_tracked_downloads("Radarr0", seen, db_file=cfg.db_file)
+
+    assert calls("DELETE") == []
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {}
