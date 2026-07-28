@@ -293,7 +293,10 @@ def test_download_client_lookup_failure_skips_item(load_main, caplog):
     responses.get(DOWNLOAD_CLIENT_URL, status=503)
     responses.post(LOGIN_URL, body="Ok.")
     qbit = m.QbitClient(QBIT, "admin", "pw")
-    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+    # A renamed client: a name-substring fallback would not recognise it and would let the
+    # item fall through to the destructive catch-all, which is the whole point of skipping.
+    responses.get(QUEUE_URL,
+                  json=queue_page([queue_item(item_id=1, download_client="Seedbox")]))
 
     m.handle_stalled_downloads(cfg, APP, qbit)
 
@@ -310,13 +313,31 @@ def test_download_client_lookup_failure_still_honours_an_untagged_first_watcher(
         make_watcher("tagged", tags=["keep"], action=D.IGNORE),
     )))
     responses.get(DOWNLOAD_CLIENT_URL, status=503)
-    qbit = qbit_client(m, [])
+    responses.post(LOGIN_URL, body="Ok.")
+    qbit = m.QbitClient(QBIT, "admin", "pw")
     responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
     responses.delete(f"{QUEUE_URL}/1", json={})
 
     m.handle_stalled_downloads(cfg, APP, qbit)
 
     assert query("DELETE") == BLOCKLIST_PARAMS
+
+
+@responses.activate
+def test_nameless_client_does_not_match_a_nameless_queue_item(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["keep"], action=D.IGNORE),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    qbit = qbit_client(m, [], clients=[{"name": None, "implementation": "QBittorrent"}])
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1, download_client=None)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    assert query("DELETE") == BLOCKLIST_PARAMS
+    assert info_calls() == []
 
 
 @responses.activate
@@ -329,7 +350,8 @@ def test_malformed_download_client_response_skips_item(load_main, caplog):
     responses.get(DOWNLOAD_CLIENT_URL, json={"error": "not authorised"})
     responses.post(LOGIN_URL, body="Ok.")
     qbit = m.QbitClient(QBIT, "admin", "pw")
-    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+    responses.get(QUEUE_URL,
+                  json=queue_page([queue_item(item_id=1, download_client="Seedbox")]))
 
     m.handle_stalled_downloads(cfg, APP, qbit)
 
