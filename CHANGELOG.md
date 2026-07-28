@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/avargaskun/ArrStalledHandler/compare/v1.4.0...v1.4.1) (2026-07-28)
+
+
+### Bug Fixes
+
+* warn when an explicitly requested config file is missing ([#15](https://github.com/avargaskun/ArrStalledHandler/issues/15)) ([d05830d](https://github.com/avargaskun/ArrStalledHandler/commit/d05830dc11e756ea915b7d584b815df7896da6d7))
+
 ## [1.4.0](https://github.com/avargaskun/ArrStalledHandler/compare/v1.3.1...v1.4.0) (2026-07-27)
 
 
