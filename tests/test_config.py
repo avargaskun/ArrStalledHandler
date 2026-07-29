@@ -373,6 +373,38 @@ def test_bad_duration(tmp_path):
     """, "watchers.0.stalledTimeout", "5x")
 
 
+@pytest.mark.parametrize("bounds,field", [
+    ("maxProgress: 101", "watchers.0.maxProgress"),
+    ("minProgress: -1", "watchers.0.minProgress"),
+])
+def test_watcher_progress_out_of_range_rejected(tmp_path, bounds, field):
+    assert_config_error(tmp_path, f"""
+        version: 1
+        watchers:
+          - name: w
+            {bounds}
+    """, field)
+
+
+def test_watcher_progress_non_numeric_rejected(tmp_path):
+    assert_config_error(tmp_path, """
+        version: 1
+        watchers:
+          - name: w
+            maxProgress: lots
+    """, "watchers.0.maxProgress")
+
+
+def test_watcher_min_above_max_rejected(tmp_path):
+    assert_config_error(tmp_path, """
+        version: 1
+        watchers:
+          - name: w
+            minProgress: 50
+            maxProgress: 10
+    """, "watchers.0", "minProgress (50.0) must not exceed maxProgress (10.0)")
+
+
 def test_bad_run_interval(tmp_path):
     assert_config_error(tmp_path, "version: 1\nrunInterval: -3\n", "runInterval")
 
@@ -617,6 +649,47 @@ def test_implicit_default_appended_when_last_watcher_tagged(tmp_path):
     assert implicit.tags == ()
     assert implicit.stalled_timeout == 3600
     assert implicit.action is Disposition.REMOVE_AND_BLOCKLIST_SEARCH
+
+
+def test_watcher_progress_bounds_parsed(tmp_path):
+    cfg = load(tmp_path, {"RADARR_URL": "http://a", "RADARR_API_KEY": "k"}, """
+        version: 1
+        watchers:
+          - name: bounded
+            minProgress: 5
+            maxProgress: 95.5
+          - name: catch-all
+            action: KEEP
+    """)
+
+    bounded, catch_all = cfg.watchers
+    assert (bounded.min_progress, bounded.max_progress) == (5.0, 95.5)
+    assert (catch_all.min_progress, catch_all.max_progress) == (None, None)
+
+
+def test_watcher_progress_env_substitution(tmp_path):
+    cfg = load(tmp_path, {"RADARR_URL": "http://a", "RADARR_API_KEY": "k", "T": "5"}, """
+        version: 1
+        watchers:
+          - name: bounded
+            maxProgress: ${T}
+          - name: catch-all
+            action: KEEP
+    """)
+
+    assert cfg.watchers[0].max_progress == 5.0
+
+
+def test_trailing_progress_watcher_gets_implicit_catch_all(tmp_path):
+    cfg = load(tmp_path, {"RADARR_URL": "http://a", "RADARR_API_KEY": "k"}, """
+        version: 1
+        watchers:
+          - name: nothing-downloaded
+            maxProgress: 0
+    """)
+
+    assert [w.name for w in cfg.watchers] == ["nothing-downloaded", "implicit-default"]
+    assert cfg.watchers[-1] is config.IMPLICIT_DEFAULT_WATCHER
 
 
 def test_implicit_default_not_appended_when_catch_all_present(tmp_path):
