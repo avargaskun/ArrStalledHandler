@@ -395,6 +395,15 @@ def test_watcher_progress_non_numeric_rejected(tmp_path):
     """, "watchers.0.maxProgress")
 
 
+def test_watcher_progress_boolean_rejected(tmp_path):
+    assert_config_error(tmp_path, """
+        version: 1
+        watchers:
+          - name: w
+            maxProgress: yes
+    """, "watchers.0.maxProgress", "not a boolean")
+
+
 def test_watcher_min_above_max_rejected(tmp_path):
     assert_config_error(tmp_path, """
         version: 1

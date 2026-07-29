@@ -747,6 +747,13 @@ def test_inconsistent_sizes_clamped(load_main):
     assert m.match_watcher(negative, watchers, None, None).name == "complete"
 
 
+def test_boolean_sizes_are_unreadable(load_main):
+    m = load_main()
+
+    assert m._item_progress(queue_item(size=True, sizeleft=True)) is None
+    assert m._item_progress(queue_item(size=1000, sizeleft=False)) is None
+
+
 @responses.activate
 def test_unreadable_progress_skips_item(load_main, caplog):
     m = load_main()

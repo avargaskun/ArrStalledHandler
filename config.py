@@ -171,6 +171,14 @@ class WatcherModel(_StrictModel):
 
     _check_name = field_validator("name")(_normalize_name)
 
+    @field_validator("minProgress", "maxProgress", mode="before")
+    @classmethod
+    def _reject_bool_progress(cls, value):
+        # YAML 1.1 reads yes/no/on/off as booleans, which lax mode would coerce to 1.0/0.0.
+        if isinstance(value, bool):
+            raise ValueError("must be a number between 0 and 100, not a boolean")
+        return value
+
     @field_validator("stalledTimeout", mode="before")
     @classmethod
     def _parse_timeout(cls, value):
