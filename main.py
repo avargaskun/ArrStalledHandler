@@ -275,7 +275,7 @@ def _item_progress(item):
     return max(0.0, min(100.0, (size - sizeleft) / size * 100.0))
 
 def match_watcher(item, watchers, qbit, qbit_clients):
-    """Return the first watcher matching the queue item, or SKIP_ITEM when tags can't be resolved."""
+    """Return the first watcher matching the queue item, or SKIP_ITEM when tags or progress can't be resolved."""
     item_tags = None
     progress = _item_progress(item)
 

@@ -114,18 +114,37 @@ watchers:
     # from any other client simply fall through to the next watcher. Which
     # clients are qBittorrent comes from the *arr's own downloadclient list
     # (matched on implementation), so the name you gave the client is free.
-    # Omit (or leave empty) to match every download — that makes the block a
-    # catch-all, so anything after it is unreachable.
+    # Omit (or leave empty) to match every download; with no progress bounds
+    # either, that makes the block a catch-all, so anything after it is
+    # unreachable.
     # A ${VAR} reference in this inline form must be quoted — tags: ["${TAG}"].
     tags: [keep, private]
     stalledTimeout: 6h                    # optional duration; default 1h
     action: IGNORE                        # optional; default REMOVE_AND_BLOCKLIST_SEARCH
 
+  # Hit-and-run safety on a private tracker: a torrent that never downloaded a
+  # single byte is safe to drop, a partially-downloaded one is not.
+  - name: private-nothing-downloaded
+    tags: [privateTracker]
+    # Progress bounds, in percent (0-100, int or float), both inclusive:
+    #   maxProgress: X  matches when progress <= X
+    #   minProgress: X  matches when progress >= X
+    # Declare both to form a range. Progress comes from the *arr's own
+    # size/sizeleft, so any download client works and no downloader is needed
+    # unless the block also declares tags. All conditions on a block are ANDed.
+    maxProgress: 0
+    stalledTimeout: 30m
+    action: REMOVE_AND_BLOCKLIST_SEARCH
+
+  - name: private-partial                 # partial data: leave it alone
+    tags: [privateTracker]
+    action: IGNORE
+
   - name: default
     stalledTimeout: 1h
     action: REMOVE_AND_BLOCKLIST_SEARCH
 
-# If the last watcher still declares tags, an implicit catch-all
+# If the last watcher still declares tags or progress bounds, an implicit catch-all
 # (1h / REMOVE_AND_BLOCKLIST_SEARCH) is appended so every item matches something.
 # To leave untagged downloads alone instead, end the list with an explicit
 # catch-all using `action: IGNORE`.
