@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.3](https://github.com/avargaskun/ArrStalledHandler/compare/v1.4.2...v1.4.3) (2026-07-29)
+
+
+### Bug Fixes
+
+* restart the stall timer when a download recovers ([18e15eb](https://github.com/avargaskun/ArrStalledHandler/commit/18e15eb48b878fae2d35e0c8f03c45d02639a66e))
+
 ## [1.4.2](https://github.com/avargaskun/ArrStalledHandler/compare/v1.4.1...v1.4.2) (2026-07-28)
 
 
