@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
@@ -796,4 +797,188 @@ def test_legacy_env_config_end_to_end(load_main, tmp_path):
     assert query("DELETE") == {"removeFromClient": ["true"], "changeCategory": ["false"],
                                "blocklist": ["true"], "skipRedownload": ["false"]}
     assert json.loads(calls("POST")[0].request.body) == {"name": "MoviesSearch", "movieIds": [770]}
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {}
+
+
+# --- handler return contracts -----------------------------------------------
+
+@responses.activate
+def test_handler_returns_seen_ids(load_main):
+    m = load_main()
+    cfg = make_config()
+    m.initialize_database(cfg.db_file)
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1),
+                                              queue_item(item_id=2, download_id="OTHERHASH")]))
+
+    assert m.handle_stalled_downloads(cfg, APP, None) == {"1", "2"}
+
+
+@responses.activate
+def test_handler_returns_none_when_queue_read_fails(load_main, caplog):
+    m = load_main()
+    first_detected = ago(3700)
+    cfg = tracked_config(m, make_config(), first_detected=first_detected)
+    responses.get(QUEUE_URL, status=500)
+
+    with caplog.at_level(logging.WARNING):
+        assert m.handle_stalled_downloads(cfg, APP, None) is None
+
+    assert "Could not read the queue of Radarr0" in caplog.text
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {"1": first_detected}
+
+
+@responses.activate
+def test_handler_returns_empty_set_for_empty_queue(load_main):
+    m = load_main()
+    cfg = make_config()
+    m.initialize_database(cfg.db_file)
+    responses.get(QUEUE_URL, json=queue_page([]))
+
+    seen = m.handle_stalled_downloads(cfg, APP, None)
+
+    assert seen is not None
+    assert seen == set()
+
+
+@responses.activate
+def test_handler_excludes_non_matching_error_messages(load_main):
+    m = load_main()
+    cfg = make_config()
+    m.initialize_database(cfg.db_file)
+    responses.get(QUEUE_URL, json=queue_page([
+        queue_item(item_id=1),
+        queue_item(item_id=2, error="Something else", download_id="OTHERHASH"),
+    ]))
+
+    assert m.handle_stalled_downloads(cfg, APP, None) == {"1"}
+
+
+@responses.activate
+def test_metadata_handler_returns_empty_set_when_disabled(load_main):
+    m = load_main()
+
+    seen = m.detect_stuck_metadata_downloads(make_config(count_metadata_as_stalled=False), APP, None)
+
+    assert seen == set()
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_metadata_handler_returns_seen_ids(load_main):
+    m = load_main()
+    cfg = make_config(count_metadata_as_stalled=True)
+    m.initialize_database(cfg.db_file)
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=7, error=METADATA_ERROR)]))
+
+    assert m.detect_stuck_metadata_downloads(cfg, APP, None) == {"7"}
+
+
+@responses.activate
+def test_metadata_handler_returns_none_when_queue_read_fails(load_main, caplog):
+    m = load_main()
+    first_detected = ago(3700)
+    cfg = tracked_config(m, make_config(count_metadata_as_stalled=True),
+                         first_detected=first_detected)
+    responses.get(QUEUE_URL, status=500)
+
+    with caplog.at_level(logging.WARNING):
+        assert m.detect_stuck_metadata_downloads(cfg, APP, None) is None
+
+    assert "Could not read the queue of Radarr0" in caplog.text
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {"1": first_detected}
+
+
+@responses.activate
+def test_skipped_item_still_reported_as_seen(load_main):
+    m = load_main()
+    first_detected = ago(3700)
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("tagged", tags=["slow"], action=D.IGNORE),
+    )), first_detected=first_detected)
+    responses.get(DOWNLOAD_CLIENT_URL, json=QBIT_CLIENT)
+    responses.post(LOGIN_URL, body="Ok.")
+    responses.get(INFO_URL, status=500)
+    qbit = m.QbitClient(QBIT, "admin", "pw")
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+
+    assert m.handle_stalled_downloads(cfg, APP, qbit) == {"1"}
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {"1": first_detected}
+
+
+@responses.activate
+def test_ignored_item_still_reported_as_seen(load_main):
+    m = load_main()
+    first_detected = ago(3700)
+    cfg = tracked_config(m, make_config(watchers=(make_watcher(action=D.IGNORE),)),
+                         first_detected=first_detected)
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+
+    assert m.handle_stalled_downloads(cfg, APP, None) == {"1"}
+    assert calls("DELETE") == []
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {"1": first_detected}
+
+
+# --- reconciliation regression ---
+
+@responses.activate
+def test_recovered_download_gets_fresh_timer(load_main):
+    m = load_main()
+    cfg = make_config(watchers=(make_watcher(stalled_timeout=3600, action=D.REMOVE_AND_BLOCKLIST),))
+    original = ago(3700)
+    tracked_config(m, cfg, download_id="1", first_detected=original)
+
+    responses.get(QUEUE_URL, json=queue_page([]))                        # cycle 1: recovered
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))   # cycle 2: stalled again
+
+    seen = m.handle_stalled_downloads(cfg, APP, None)
+    m.reconcile_tracked_downloads("Radarr0", seen, db_file=cfg.db_file)
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {}
+
+    m.handle_stalled_downloads(cfg, APP, None)
+
+    assert calls("DELETE") == []
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file)["1"] > original
+
+
+@responses.activate
+def test_still_stalled_download_keeps_its_timer(load_main):
+    m = load_main()
+    cfg = make_config(watchers=(make_watcher(stalled_timeout=3600, action=D.REMOVE_AND_BLOCKLIST),))
+    original = ago(100)
+    tracked_config(m, cfg, download_id="1", first_detected=original)
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+
+    seen = m.handle_stalled_downloads(cfg, APP, None)
+
+    assert m.reconcile_tracked_downloads("Radarr0", seen, db_file=cfg.db_file) == 0
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {"1": original}
+
+
+@responses.activate
+def test_completed_download_row_pruned(load_main):
+    m = load_main()
+    cfg = make_config(watchers=(make_watcher(stalled_timeout=3600, action=D.REMOVE_AND_BLOCKLIST),))
+    tracked_config(m, cfg, download_id="1", first_detected=ago(100))
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=2)]))
+
+    seen = m.handle_stalled_downloads(cfg, APP, None)
+
+    assert m.reconcile_tracked_downloads("Radarr0", seen, db_file=cfg.db_file) == 1
+    assert list(m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file)) == ["2"]
+
+
+@responses.activate
+def test_flapping_download_is_never_actioned(load_main):
+    m = load_main()
+    cfg = make_config(watchers=(make_watcher(stalled_timeout=0, action=D.REMOVE_AND_BLOCKLIST),))
+    m.initialize_database(cfg.db_file)
+    responses.delete(f"{QUEUE_URL}/1", json={})
+    for records in ([queue_item(item_id=1)], [], [queue_item(item_id=1)], []):
+        responses.get(QUEUE_URL, json=queue_page(records))
+
+    for _ in range(4):
+        seen = m.handle_stalled_downloads(cfg, APP, None)
+        m.reconcile_tracked_downloads("Radarr0", seen, db_file=cfg.db_file)
+
+    assert calls("DELETE") == []
     assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {}

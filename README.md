@@ -66,7 +66,7 @@ Both can be combined: the YAML file takes precedence for whatever it defines, an
 | `QBITTORRENT_USERNAME`                  | Username for qBittorrent Web UI authentication.                                                 | None (optional)        |
 | `QBITTORRENT_PASSWORD`                  | Password for qBittorrent Web UI authentication.                                                 | None (optional)        |
 | `IGNORE_TORRENT_TAGS`                   | Comma-separated list of qBittorrent tags. Torrents with these tags will be ignored.             | None (optional)        |
-| `STALLED_TIMEOUT`                       | How long a download must remain stalled before actions are taken. Seconds, or a [duration](#durations) like `1h30m`. | `3600` (1 hour)        |
+| `STALLED_TIMEOUT`                       | How long a download must remain *continuously* stalled before actions are taken. If a poll finds the download is no longer stalled the timer restarts from zero. Seconds, or a [duration](#durations) like `1h30m`. | `3600` (1 hour)        |
 | `STALLED_ACTION`                        | Action to perform on stalled downloads. Accepts the legacy names `REMOVE`, `BLOCKLIST` and `BLOCKLIST_AND_SEARCH` as well as any of the [new disposition names](#actions-dispositions). | `BLOCKLIST_AND_SEARCH` |
 | `VERBOSE`                               | Enable verbose logging for debugging (`true` or `false`).                                       | `false`                |
 | `RUN_INTERVAL`                          | Time between script executions when running in Docker. Seconds, or a [duration](#durations).    | `300` (5 minutes)      |
@@ -288,7 +288,7 @@ When no `watchers` section exists, the environment values are synthesized into e
 1.  **Initialization**:
 
     -   The configuration is loaded and validated; any problem is logged and the script exits.
-    -   The script initializes a SQLite database (`stalled_downloads.db` by default) to track stalled downloads, and prunes tracking rows belonging to instances that are no longer configured.
+    -   The script initializes a SQLite database (`stalled_downloads.db` by default) to track stalled downloads, and prunes tracking rows belonging to instances that are no longer configured. On every cycle it also drops the tracking rows of downloads that are no longer stalled, so a download that recovers stops being tracked.
     -   It fetches the current queue from each configured *arr instance.
 2.  **Detect Stalled Downloads**:
 
@@ -301,7 +301,10 @@ When no `watchers` section exists, the environment values are synthesized into e
     -   Downloads matching an `IGNORE` policy are skipped entirely — no API call, no tracking.
 4.  **Timeout Check**:
 
-    -   Downloads are only handled once they have been stalled longer than the matched policy's `stalledTimeout`.
+    -   Downloads are only handled once they have been stalled longer than the matched policy's `stalledTimeout`. The timeout measures a *continuous* stall: a download that stops being stalled is no longer tracked, so if it stalls again later it starts a fresh timer rather than resuming the old one.
+    -   Because the state is sampled once per `runInterval`, the streak is only as accurate as the poll rate, in both directions:
+        -   A download that stalls and recovers entirely between two polls is never observed as recovered, so its timer keeps running.
+        -   Conversely, a single poll in which the download is not stalled restarts the clock. A download that briefly recovers more often than its `stalledTimeout` is therefore never actioned. This is the intended reading of "continuously stalled", but it is the direction most likely to look like a regression — see [Troubleshooting](#troubleshooting).
 5.  **Perform Configured Action**:
 
     -   The matched policy's [action](#actions-dispositions) determines the parameters sent to the *arr queue `DELETE` endpoint (`removeFromClient`, `changeCategory`, `blocklist`, `skipRedownload`).
@@ -603,6 +606,7 @@ INFO: Script execution completed. Sleeping for 300 seconds...
 
 1. **Script Not Executing Actions**:
     -   Check if `STALLED_TIMEOUT` (or the matched watcher's `stalledTimeout`) is too high.
+    -   The download may be recovering briefly between polls. Any poll that does not see it stalled restarts its timer, so a download that flaps more often than `stalledTimeout` is never actioned. Look for `Stopped tracking ... recovered download(s)` appearing repeatedly in the logs — enable verbose logging to see which downloads those are; lowering `stalledTimeout` below the gap between its recoveries makes it actionable again.
     -   Verify the stalled downloads are correctly detected via Radarr/Sonarr queues.
     -   Enable verbose logging to see which watcher each download matched.
 

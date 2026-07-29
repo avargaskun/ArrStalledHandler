@@ -90,6 +90,34 @@ def prune_orphaned_services(db_file, configured_names):
 
     return deleted
 
+def reconcile_tracked_downloads(arr_service, seen_ids, db_file=DB_FILE):
+    """Drop tracking rows for downloads no longer observed in a stalled state.
+
+    Every tracked row absent from seen_ids belongs to a download that recovered or
+    left the queue, so its first_detected must not survive into a future stall.
+    """
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT download_id FROM stalled_downloads WHERE arr_service = ?", (arr_service,))
+    stale = {str(row[0]) for row in cursor.fetchall()} - {str(i) for i in seen_ids}
+
+    if stale:
+        # executemany, never a single IN (...): stale is unbounded and would blow SQLITE_MAX_VARIABLE_NUMBER
+        cursor.executemany(
+            "DELETE FROM stalled_downloads WHERE arr_service = ? AND download_id = ?",
+            [(arr_service, download_id) for download_id in stale],
+        )
+        conn.commit()
+
+    conn.close()
+
+    if stale:
+        logging.info(f"Stopped tracking {len(stale)} recovered download(s) in {arr_service}.")
+        logging.debug(f"No longer stalled in {arr_service}: {sorted(stale)}")
+
+    return len(stale)
+
 def query_api(url, headers, params=None):
     """Query an API endpoint and return the JSON response."""
     try:
@@ -299,10 +327,15 @@ def _process_queue_item(cfg, app, qbit, item, tracked, qbit_clients, kind="stall
         logging.info(f"Adding {kind} download ID {download_id} in {app.name} to the database.")
 
 def detect_stuck_metadata_downloads(cfg, app, qbit):
-    """Detect downloads stuck at 'Downloading Metadata' and apply the watcher timeout logic."""
+    """Detect downloads stuck at 'Downloading Metadata' and apply the watcher timeout logic.
+
+    Returns the set of queue-item IDs observed stuck this cycle, or None when the queue
+    read failed and the view of the queue is therefore incomplete. A disabled feature
+    contributes no stalled downloads, which is a complete statement, so it returns set().
+    """
     if not cfg.count_metadata_as_stalled:
         logging.debug(f"Skipping 'Downloading Metadata' detection for {app.name} (disabled).")
-        return
+        return set()
 
     # Query parameters for metadata detection
     params = {
@@ -316,20 +349,33 @@ def detect_stuck_metadata_downloads(cfg, app, qbit):
     queue_url = f"{app.url}/api/{app.api_version}/queue"
     metadata_records = query_api_paginated(queue_url, headers, params, page_size=50)
 
+    if metadata_records is None:
+        logging.warning(f"Could not read the queue of {app.name}; "
+                        "skipping this cycle and keeping its tracking timers.")
+        return None
+
     if not metadata_records:
         logging.info(f"No stuck downloads detected in {app.name}.")
-        return
+        return set()
 
     tracked = get_stalled_downloads_from_db(app.name, db_file=cfg.db_file)
     qbit_clients = resolve_qbittorrent_clients(app, qbit, cfg.watchers)
 
+    seen = set()
     for item in metadata_records:
         if (item.get("errorMessage") or "").lower() == "qbittorrent is downloading metadata":
+            seen.add(str(item["id"]))
             _process_queue_item(cfg, app, qbit, item, tracked, qbit_clients,
                                 kind="stuck metadata")
+    return seen
 
 def query_api_paginated(base_url, headers, params=None, page_size=50):
-    """Query an API endpoint with pagination to retrieve all records."""
+    """Query an API endpoint with pagination to retrieve all records.
+
+    Returns None when any page failed, was malformed, or came up short of the reported
+    total — a partial view must never be mistaken for a complete one — [] when the
+    endpoint is genuinely empty, and the full record list otherwise.
+    """
     all_records = []
     page = 1  # Start with the first page
     total_records = None  # Will be set from the API response
@@ -343,11 +389,11 @@ def query_api_paginated(base_url, headers, params=None, page_size=50):
 
         if response is None:
             logging.error(f"API returned None for page {page}. Exiting pagination.")
-            break
+            return None
 
         if not isinstance(response, dict) or "records" not in response:
             logging.error(f"Unexpected response from API: {response}")
-            break
+            return None
 
         # Fetch the records and total number of records
         records = response.get("records", [])
@@ -356,6 +402,10 @@ def query_api_paginated(base_url, headers, params=None, page_size=50):
         logging.debug(f"Page {page}: Retrieved {len(records)} records. Total so far: {len(all_records)} / {total_records}")
 
         if not records:
+            if total_records and len(all_records) < total_records:
+                logging.error(f"API reported {total_records} records but delivered {len(all_records)}; "
+                              "treating the read as incomplete.")
+                return None
             logging.debug(f"No more records found on page {page}. Completed pagination.")
             break
 
@@ -401,6 +451,9 @@ def perform_action(app, download_id, movie_id, episode_ids, action):
 def handle_stalled_downloads(cfg, app, qbit):
     """
     Handle downloads that are stalled (status=warning).
+
+    Returns the set of queue-item IDs observed stalled this cycle, or None when the
+    queue read failed and the view of the queue is therefore incomplete.
     """
     logging.info(f"Checking stalled downloads in {app.name}...")
 
@@ -415,15 +468,23 @@ def handle_stalled_downloads(cfg, app, qbit):
     queue_url = f"{app.url}/api/{app.api_version}/queue"
     queue_records = query_api_paginated(queue_url, headers, params, page_size=50)
 
+    if queue_records is None:
+        logging.warning(f"Could not read the queue of {app.name}; "
+                        "skipping this cycle and keeping its tracking timers.")
+        return None
+
     if not queue_records:
         logging.info(f"No stalled downloads found in {app.name}.")
-        return
+        return set()
 
     tracked = get_stalled_downloads_from_db(app.name, db_file=cfg.db_file)
     qbit_clients = resolve_qbittorrent_clients(app, qbit, cfg.watchers)
+    seen = set()
     for item in queue_records:
         if (item.get("errorMessage") or "").lower() == "the download is stalled with no connections":
+            seen.add(str(item["id"]))
             _process_queue_item(cfg, app, qbit, item, tracked, qbit_clients)
+    return seen
 
 # --- Health Check Server Logic ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -475,8 +536,13 @@ def main():
     try:
         while True:
             for app in cfg.arr_apps:
-                handle_stalled_downloads(cfg, app, qbit)
-                detect_stuck_metadata_downloads(cfg, app, qbit)
+                stalled_seen = handle_stalled_downloads(cfg, app, qbit)
+                metadata_seen = detect_stuck_metadata_downloads(cfg, app, qbit)
+
+                if stalled_seen is None or metadata_seen is None:
+                    logging.debug(f"Incomplete queue view for {app.name}; keeping all tracking timers.")
+                else:
+                    reconcile_tracked_downloads(app.name, stalled_seen | metadata_seen, db_file=cfg.db_file)
 
             logging.info(f"Script execution completed. Sleeping for {cfg.run_interval} seconds...")
             time.sleep(cfg.run_interval)
