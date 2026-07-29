@@ -263,11 +263,35 @@ def _uses_qbittorrent(item, qbit_clients):
     """Whether the queue item's download client is one of the *arr's qBittorrent clients."""
     return (item.get('downloadClient') or '').lower() in qbit_clients
 
+def _item_progress(item):
+    """Percent downloaded from the *arr's size/sizeleft, or None when unreadable."""
+    size = item.get("size")
+    sizeleft = item.get("sizeleft")
+    if (not isinstance(size, (int, float)) or isinstance(size, bool)
+            or not isinstance(sizeleft, (int, float)) or isinstance(sizeleft, bool)):
+        return None
+    if size <= 0:
+        return 0.0
+    return max(0.0, min(100.0, (size - sizeleft) / size * 100.0))
+
 def match_watcher(item, watchers, qbit, qbit_clients):
     """Return the first watcher matching the queue item, or SKIP_ITEM when tags can't be resolved."""
     item_tags = None
+    progress = _item_progress(item)
 
     for watcher in watchers:
+        if watcher.min_progress is not None or watcher.max_progress is not None:
+            if progress is None:
+                logging.warning(
+                    f"Could not read size/sizeleft for '{item.get('title')}'; "
+                    "skipping it this cycle."
+                )
+                return SKIP_ITEM
+            if watcher.min_progress is not None and progress < watcher.min_progress:
+                continue
+            if watcher.max_progress is not None and progress > watcher.max_progress:
+                continue
+
         if not watcher.tags:
             return watcher
 
