@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/avargaskun/ArrStalledHandler/compare/v1.4.3...v1.5.0) (2026-07-30)
+
+
+### Features
+
+* match watchers on download progress ([#21](https://github.com/avargaskun/ArrStalledHandler/issues/21)) ([1d9ddbb](https://github.com/avargaskun/ArrStalledHandler/commit/1d9ddbbd7ef9609f586f6387642e6ca8f8b70827))
+
 ## [1.4.3](https://github.com/avargaskun/ArrStalledHandler/compare/v1.4.2...v1.4.3) (2026-07-29)
 
 
