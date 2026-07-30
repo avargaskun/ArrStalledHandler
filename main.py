@@ -137,12 +137,14 @@ def post_api(url, headers, data=None):
         logging.error(f"API POST Error: {e}")
 
 def delete_api(url, headers, params=None):
+    """Return the HTTP status code, or None when no response was received."""
     try:
         response = requests.delete(url, headers=headers, params=params)
-        response.raise_for_status()
-        logging.debug(f"Successfully performed DELETE action on {url} with params {params}.")
     except requests.RequestException as e:
         logging.error(f"API DELETE Error: {e}")
+        return None
+    logging.debug(f"DELETE on {url} with params {params} returned {response.status_code}.")
+    return response.status_code
 
 class QbitClient:
     """qBittorrent Web API client owning its session, login and tag lookups."""
