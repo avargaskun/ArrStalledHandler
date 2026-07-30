@@ -1239,6 +1239,29 @@ def test_sibling_records_share_one_delete_and_search_each(load_main, caplog):
 
 
 @responses.activate
+def test_sibling_within_timeout_is_not_actioned_with_the_group(load_main):
+    m = load_main()
+    cfg = make_config(watchers=(make_watcher(action=D.KEEP_AND_BLOCKLIST_SEARCH),))
+    sonarr = make_app(type="sonarr", name="Sonarr1", url=RADARR, api_key="key")
+    fresh = ago(10)
+    tracked_config(m, cfg, download_id="1", arr_service="Sonarr1")
+    m.add_stalled_download_to_db("2", fresh, "Sonarr1", db_file=cfg.db_file)
+    responses.get(QUEUE_URL, json=queue_page([
+        queue_item(item_id=1, download_id=PACK_HASH, episodeId=11),
+        queue_item(item_id=2, download_id=PACK_HASH, episodeId=12),
+    ]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+    responses.delete(f"{QUEUE_URL}/2", json={})
+    responses.post(COMMAND_URL, json={})
+
+    m.handle_stalled_downloads(cfg, sonarr, None)
+
+    assert len(calls("DELETE")) == 1
+    assert search_bodies() == [{"name": "EpisodeSearch", "episodeIds": [11]}]
+    assert m.get_stalled_downloads_from_db("Sonarr1", db_file=cfg.db_file) == {"2": fresh}
+
+
+@responses.activate
 def test_delete_404_drops_row_without_error(load_main, caplog):
     m = load_main()
     cfg = tracked_config(m, make_config(watchers=(make_watcher(action=D.REMOVE_AND_BLOCKLIST),)))
