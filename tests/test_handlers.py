@@ -660,6 +660,187 @@ def test_match_watcher_without_catch_all_skips_item(load_main):
     assert m.match_watcher(queue_item(), watchers, None, None) is m.SKIP_ITEM
 
 
+# --- progress matching ------------------------------------------------------
+
+KEEP_PARAMS = {"removeFromClient": ["false"], "changeCategory": ["false"],
+               "blocklist": ["false"], "skipRedownload": ["false"]}
+
+PROGRESS_WATCHERS = (
+    make_watcher("nothing-downloaded", max_progress=0, action=D.REMOVE_AND_BLOCKLIST),
+    make_watcher("default", action=D.KEEP),
+)
+
+
+@responses.activate
+def test_max_progress_zero_matches_nothing_downloaded(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=PROGRESS_WATCHERS))
+    responses.get(QUEUE_URL,
+                  json=queue_page([queue_item(item_id=1, size=1000, sizeleft=1000)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, None)
+
+    assert query("DELETE") == BLOCKLIST_PARAMS
+
+
+@responses.activate
+def test_max_progress_zero_rejects_any_bytes(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=PROGRESS_WATCHERS))
+    responses.get(QUEUE_URL,
+                  json=queue_page([queue_item(item_id=1, size=1000, sizeleft=999)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, None)
+
+    assert query("DELETE") == KEEP_PARAMS
+
+
+def test_min_progress_inclusive_boundary(load_main):
+    m = load_main()
+    watchers = (make_watcher("complete", min_progress=100, action=D.KEEP),
+                make_watcher("started", min_progress=1, action=D.REMOVE),
+                make_watcher("default", action=D.REMOVE_AND_BLOCKLIST))
+
+    complete = queue_item(size=1000, sizeleft=0)
+    untouched = queue_item(size=1000, sizeleft=1000)
+
+    assert m.match_watcher(complete, watchers, None, None).name == "complete"
+    assert m.match_watcher(untouched, watchers, None, None).name == "default"
+
+
+def test_progress_range_min_and_max(load_main):
+    m = load_main()
+    watchers = (make_watcher("middle", min_progress=25, max_progress=75, action=D.KEEP),
+                make_watcher("default", action=D.REMOVE_AND_BLOCKLIST))
+
+    def matched(sizeleft):
+        return m.match_watcher(queue_item(size=1000, sizeleft=sizeleft),
+                               watchers, None, None).name
+
+    assert matched(500) == "middle"
+    assert matched(900) == "default"
+    assert matched(100) == "default"
+
+
+def test_zero_size_counts_as_zero_progress(load_main):
+    m = load_main()
+    watchers = (make_watcher("nothing", max_progress=0, action=D.KEEP),
+                make_watcher("default", action=D.REMOVE_AND_BLOCKLIST))
+
+    matched = m.match_watcher(queue_item(size=0, sizeleft=0), watchers, None, None)
+
+    assert matched.name == "nothing"
+
+
+def test_inconsistent_sizes_clamped(load_main):
+    m = load_main()
+    watchers = (make_watcher("nothing", max_progress=0, action=D.KEEP),
+                make_watcher("complete", min_progress=100, action=D.REMOVE),
+                make_watcher("default", action=D.REMOVE_AND_BLOCKLIST))
+
+    over = queue_item(size=1000, sizeleft=1500)
+    negative = queue_item(size=1000, sizeleft=-1)
+
+    assert m.match_watcher(over, watchers, None, None).name == "nothing"
+    assert m.match_watcher(negative, watchers, None, None).name == "complete"
+
+
+def test_boolean_sizes_are_unreadable(load_main):
+    m = load_main()
+
+    assert m._item_progress(queue_item(size=True, sizeleft=True)) is None
+    assert m._item_progress(queue_item(size=1000, sizeleft=False)) is None
+
+
+@responses.activate
+def test_unreadable_progress_skips_item(load_main, caplog):
+    m = load_main()
+    cfg = make_config(watchers=PROGRESS_WATCHERS)
+    m.initialize_database(cfg.db_file)
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+
+    m.handle_stalled_downloads(cfg, APP, None)
+
+    assert calls("DELETE") == []
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {}
+    assert any("skipping it this cycle" in r.message for r in caplog.records)
+
+
+@responses.activate
+def test_unreadable_progress_irrelevant_without_progress_watchers(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, None)
+
+    assert query("DELETE") == BLOCKLIST_PARAMS
+
+
+@responses.activate
+def test_progress_and_tags_are_anded(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("private-nothing", tags=["private"], max_progress=0, action=D.KEEP),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    for download_id in ("2", "3"):
+        m.add_stalled_download_to_db(download_id, ago(3700), "Radarr0", db_file=cfg.db_file)
+    qbit = qbit_client(m, ["public", "private"])
+    responses.get(QUEUE_URL, json=queue_page([
+        queue_item(item_id=1, download_id="TAGGEDHALF", size=1000, sizeleft=500),
+        queue_item(item_id=2, download_id="UNTAGGEDZERO", size=1000, sizeleft=1000),
+        queue_item(item_id=3, download_id="TAGGEDZERO", size=1000, sizeleft=1000),
+    ]))
+    for item_id in (1, 2, 3):
+        responses.delete(f"{QUEUE_URL}/{item_id}", json={})
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    assert [c.request.url.split("?")[0] for c in calls("DELETE")] == [
+        f"{QUEUE_URL}/1", f"{QUEUE_URL}/2", f"{QUEUE_URL}/3"]
+    assert [query("DELETE", i) for i in range(3)] == [
+        BLOCKLIST_PARAMS, BLOCKLIST_PARAMS, KEEP_PARAMS]
+    assert len(info_calls()) == 2
+
+
+@responses.activate
+def test_progress_gate_skips_tag_lookup(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(
+        make_watcher("private-nothing", tags=["private"], max_progress=0, action=D.KEEP),
+        make_watcher("private-complete", tags=["private"], min_progress=100, action=D.KEEP),
+        make_watcher("default", action=D.REMOVE_AND_BLOCKLIST),
+    )))
+    qbit = qbit_client(m, ["private"])
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1, size=1000, sizeleft=500)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, qbit)
+
+    assert info_calls() == []
+    assert query("DELETE") == BLOCKLIST_PARAMS
+
+
+@responses.activate
+def test_untagged_progress_watcher_needs_no_downloader(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(downloader=None, watchers=PROGRESS_WATCHERS))
+    responses.get(QUEUE_URL,
+                  json=queue_page([queue_item(item_id=1, size=1000, sizeleft=1000)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.handle_stalled_downloads(cfg, APP, None)
+
+    assert query("DELETE") == BLOCKLIST_PARAMS
+    assert [c for c in responses.calls if c.request.url.startswith(DOWNLOAD_CLIENT_URL)] == []
+
+
 # --- metadata flow ----------------------------------------------------------
 
 @responses.activate
@@ -771,6 +952,20 @@ def test_metadata_flow_uses_watcher_tags(load_main):
     m.detect_stuck_metadata_downloads(cfg, APP, qbit)
 
     assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {}
+
+
+@responses.activate
+def test_metadata_flow_honours_progress_watchers(load_main):
+    m = load_main()
+    cfg = tracked_config(m, make_config(count_metadata_as_stalled=True,
+                                        watchers=PROGRESS_WATCHERS))
+    responses.get(QUEUE_URL, json=queue_page([
+        queue_item(item_id=1, error=METADATA_ERROR, size=0, sizeleft=0)]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+
+    m.detect_stuck_metadata_downloads(cfg, APP, None)
+
+    assert query("DELETE") == BLOCKLIST_PARAMS
 
 
 # --- legacy env parity ------------------------------------------------------
@@ -902,6 +1097,19 @@ def test_skipped_item_still_reported_as_seen(load_main):
     responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
 
     assert m.handle_stalled_downloads(cfg, APP, qbit) == {"1"}
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {"1": first_detected}
+
+
+@responses.activate
+def test_progress_skipped_item_still_reported_as_seen(load_main):
+    m = load_main()
+    first_detected = ago(3700)
+    cfg = tracked_config(m, make_config(watchers=PROGRESS_WATCHERS),
+                         first_detected=first_detected)
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+
+    assert m.handle_stalled_downloads(cfg, APP, None) == {"1"}
+    assert calls("DELETE") == []
     assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {"1": first_detected}
 
 

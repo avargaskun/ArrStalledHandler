@@ -164,10 +164,20 @@ class DownloaderModel(_StrictModel):
 class WatcherModel(_StrictModel):
     name: str
     tags: list[str] = Field(default_factory=list)
+    minProgress: Optional[float] = Field(default=None, ge=0, le=100)
+    maxProgress: Optional[float] = Field(default=None, ge=0, le=100)
     stalledTimeout: int = DEFAULT_STALLED_TIMEOUT
     action: QueueItemDisposition = QueueItemDisposition.REMOVE_AND_BLOCKLIST_SEARCH
 
     _check_name = field_validator("name")(_normalize_name)
+
+    @field_validator("minProgress", "maxProgress", mode="before")
+    @classmethod
+    def _reject_bool_progress(cls, value):
+        # YAML 1.1 reads yes/no/on/off as booleans, which lax mode would coerce to 1.0/0.0.
+        if isinstance(value, bool):
+            raise ValueError("must be a number between 0 and 100, not a boolean")
+        return value
 
     @field_validator("stalledTimeout", mode="before")
     @classmethod
@@ -178,6 +188,15 @@ class WatcherModel(_StrictModel):
     @classmethod
     def _parse_action(cls, value):
         return QueueItemDisposition.parse(value)
+
+    @model_validator(mode="after")
+    def _check_progress_bounds(self):
+        if (self.minProgress is not None and self.maxProgress is not None
+                and self.minProgress > self.maxProgress):
+            raise ValueError(
+                f"minProgress ({self.minProgress}) must not exceed maxProgress ({self.maxProgress})"
+            )
+        return self
 
 
 class YamlConfigModel(_StrictModel):
@@ -346,8 +365,14 @@ class Downloader:
 class Watcher:
     name: str
     tags: tuple = ()
+    min_progress: Optional[float] = None
+    max_progress: Optional[float] = None
     stalled_timeout: int = DEFAULT_STALLED_TIMEOUT
     action: QueueItemDisposition = QueueItemDisposition.REMOVE_AND_BLOCKLIST_SEARCH
+
+    @property
+    def is_catch_all(self):
+        return not self.tags and self.min_progress is None and self.max_progress is None
 
 
 @dataclass(frozen=True)
@@ -469,6 +494,8 @@ def _watchers_from_model(models):
         Watcher(
             name=model.name,
             tags=tuple(model.tags),
+            min_progress=model.minProgress,
+            max_progress=model.maxProgress,
             stalled_timeout=model.stalledTimeout,
             action=model.action,
         )
@@ -537,7 +564,7 @@ def _build_config(model, environ):
     else:
         watchers = _collect(problems, lambda: _watchers_from_env(environ), [])
 
-    if not watchers or watchers[-1].tags:
+    if not watchers or not watchers[-1].is_catch_all:
         watchers.append(IMPLICIT_DEFAULT_WATCHER)
 
     if model is not None and model.runInterval is not None:

@@ -24,6 +24,7 @@ This project is available on [GitHub](https://github.com/avargaskun/ArrStalledHa
         -   Blocklist and re-trigger a search for the movie or episodes.
 -   **Per-Tag Policies (`watchers`)**:
     -   With a [YAML config file](#yaml-configuration), define ordered policy blocks matched on qBittorrent tags.
+    -   Blocks can also match on how much of the download has completed (`minProgress`/`maxProgress`), so a torrent that stalled before downloading anything can get a different policy than one with partial data.
     -   Each block gets its own stall timeout and action, including `IGNORE` (leave the download alone).
     -   Nine action dispositions cover every combination of the *arr queue-delete parameters.
 -   **Selective Ignore via qBittorrent Tags**:
@@ -229,20 +230,30 @@ watchers:
     tags: [slow]
     stalledTimeout: 12h
     action: REMOVE
-  - name: default             # no tags = catch-all
+  - name: nothing-downloaded  # 0% complete, whatever the tags
+    maxProgress: 0
+    stalledTimeout: 30m
+    action: REMOVE_AND_BLOCKLIST_SEARCH
+  - name: default             # no conditions = catch-all
     stalledTimeout: 1h
     action: REMOVE_AND_BLOCKLIST_SEARCH
 ```
 
 Matching rules:
 
--   **A block with no `tags` matches everything.** Anything listed after it is unreachable.
+-   **A block with no `tags` and no progress bounds matches everything.** Anything listed after it is unreachable.
+-   **All conditions on a block are ANDed.** A block with both `tags` and a progress bound matches only items satisfying both; a block with neither matches everything.
 -   **Tags are OR-matched and compared case-insensitively.** A torrent tagged `Keep` matches `tags: [keep]`.
 -   **Tag matching needs qBittorrent.** A tagged block can only match a queue item whose download client is qBittorrent while a downloader is configured; every other item falls straight through to the next block. A startup warning is logged when watchers declare tags but no downloader exists.
 -   **Which clients count as qBittorrent is read from the \*arr itself.** Once per queue scan (and only when some block declares tags) the script calls the \*arr's `downloadclient` endpoint and treats every client whose *implementation* is qBittorrent as a match, whatever you named it — so a client called `Seedbox` works. **If that call fails, downloads that would need tag matching are skipped for the cycle** with a warning and retried next time, exactly as for a failed tag lookup — they are never handled with a default policy on incomplete information. Note that when your *first* block is tagged, that means **every** download from that instance is skipped until the lookup recovers, including ones from other download clients that would simply have fallen through. A warning is also logged when an instance has no qBittorrent client at all, since no tagged block can ever match it — once per instance rather than every cycle, because that is a static misconfiguration; it is logged again if the instance reports a qBittorrent client and later stops. A *failed* lookup does warn every cycle, because each occurrence means downloads were actually skipped that cycle.
 -   **Tags are fetched at most once per item per cycle**, only when a tagged block is actually reached.
 -   **If the tag lookup fails, the item is skipped for that cycle** with a warning and retried next time. It is deliberately *not* matched against later untagged blocks — applying a destructive default to a download the user may have tagged for protection is exactly the failure this avoids. (A torrent qBittorrent simply doesn't know about is a successful lookup returning no tags, so it does fall through.)
--   **An implicit catch-all is appended** (`1h` / `REMOVE_AND_BLOCKLIST_SEARCH`) unless your last block is already a catch-all, guaranteeing every item matches something. To leave untagged downloads alone, end the list with an explicit catch-all using `action: IGNORE`.
+-   **`minProgress` / `maxProgress` match on how much has been downloaded.** Both are optional, expressed in **percent** (`0`–`100`, integer or float) and **inclusive**: `maxProgress: X` matches when progress ≤ X, `minProgress: X` matches when progress ≥ X. So `maxProgress: 0` means "not a single byte downloaded" and `minProgress: 100` means "complete". Declare both on one block to form a range; `minProgress` above `maxProgress` is a fatal configuration error. These keys are YAML-only — there is no environment equivalent, because a progress-conditioned block is only useful with a fallback block after it.
+-   **Progress comes from the \*arr's own queue record** (`size`/`sizeleft`), not from the download client. It therefore works with **any** download client, needs no `downloaders` section, and costs no extra API call. A block that declares *only* progress bounds matches without qBittorrent being configured at all.
+-   **A download whose reported size is still 0 counts as 0%.** That is the usual shape of an item stuck on "Downloading Metadata", so `maxProgress: 0` also covers the [metadata flow](#how-it-works) when `countDownloadingMetadataAsStalled` is enabled.
+-   **If `size`/`sizeleft` are missing or non-numeric, the item is skipped for that cycle** with a warning, exactly as for a failed tag lookup — and for the same reason: falling through past a protective block such as `minProgress: 95 → KEEP` onto a destructive catch-all is the failure this avoids. Items only get skipped when a block with progress bounds is actually reached; blocks without them are unaffected. Byte counts that are numeric but inconsistent (`sizeleft` above `size`, or negative) are clamped into `0`–`100` rather than treated as unreadable.
+-   **Progress is evaluated before tags**, so a block disqualified on progress never triggers a qBittorrent tag lookup.
+-   **An implicit catch-all is appended** (`1h` / `REMOVE_AND_BLOCKLIST_SEARCH`) unless your last block is already a catch-all (no tags *and* no progress bounds), guaranteeing every item matches something. To leave untagged downloads alone, end the list with an explicit catch-all using `action: IGNORE`.
 -   **`IGNORE` matches make no API call and no database write.** A pre-existing tracking row is left in place, so if the item later stops matching an `IGNORE` block its original detection time still applies.
 -   **The timeout compared against is the matched block's** `stalledTimeout`, not a global value.
 
@@ -324,6 +335,21 @@ The qBittorrent tag integration allows you to apply different policies to stalle
 - Long-running downloads that you know will take time
 - Downloads from slow trackers that you want to keep
 - Special cases where you want manual control
+- Private trackers with hit-and-run rules, by combining a tag with a progress bound
+
+**Hit-and-run safety.** Removing a partially-downloaded private-tracker torrent can count against you, while a torrent that never downloaded anything almost never does. Tag those torrents in qBittorrent and pair the tag with [`maxProgress`](#watchers) so only the dead ones are cleaned up:
+
+``` yaml
+watchers:
+  - name: private-nothing-downloaded
+    tags: [privateTracker]
+    maxProgress: 0            # zero bytes downloaded: safe to drop
+    stalledTimeout: 30m
+    action: REMOVE_AND_BLOCKLIST_SEARCH
+  - name: private-partial     # anything already downloaded: leave it alone
+    tags: [privateTracker]
+    action: IGNORE
+```
 
 ### Setup
 

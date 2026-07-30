@@ -42,9 +42,12 @@ def queue_page(records, total=None):
     return {"records": records, "totalRecords": total if total is not None else len(records)}
 
 
-def make_watcher(name="default", tags=(), stalled_timeout=3600,
+def make_watcher(name="default", tags=(), min_progress=None, max_progress=None,
+                 stalled_timeout=3600,
                  action=config.QueueItemDisposition.REMOVE_AND_BLOCKLIST_SEARCH):
-    return config.Watcher(name=name, tags=tuple(tags), stalled_timeout=stalled_timeout, action=action)
+    return config.Watcher(name=name, tags=tuple(tags), min_progress=min_progress,
+                          max_progress=max_progress, stalled_timeout=stalled_timeout,
+                          action=action)
 
 
 def make_app(type="radarr", name="Radarr0", url="http://arr", api_key="k", force_search=True):
