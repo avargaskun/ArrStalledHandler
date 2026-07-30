@@ -447,18 +447,31 @@ def query_api_paginated(base_url, headers, params=None, page_size=50):
 
     return all_records
 
-def perform_action(app, download_id, movie_id, episode_ids, action):
-    """Apply a QueueItemDisposition to a queue item, optionally triggering a re-search."""
+def perform_action(app, download_id, movie_id, episode_ids, action, skip_delete=False):
+    """Apply a QueueItemDisposition to a queue item, optionally triggering a re-search.
+
+    Returns True when the disposition is applied (or moot), False when it must be retried.
+    """
     if action is config.QueueItemDisposition.IGNORE:
         raise ValueError("IGNORE items are skipped before reaching perform_action")
 
     headers = {"X-Api-Key": app.api_key}
-    action_url = f"{app.url}/api/{app.api_version}/queue/{download_id}"
-    logging.info(f"Performing action: {action.name} (ID: {download_id}) in {app.name}...")
-    delete_api(action_url, headers, action.as_params())
+    if skip_delete:
+        logging.debug(f"Queue record {download_id} shares an already-actioned download; skipping DELETE.")
+    else:
+        action_url = f"{app.url}/api/{app.api_version}/queue/{download_id}"
+        logging.info(f"Performing action: {action.name} (ID: {download_id}) in {app.name}...")
+        status = delete_api(action_url, headers, action.as_params())
+        if status == 404:
+            logging.info(f"Queue item {download_id} in {app.name} was already removed; nothing to delete.")
+        elif status is None or status >= 400:
+            detail = f" (HTTP {status})" if status is not None else ""
+            logging.error(f"Failed to apply {action.name} to queue item {download_id} "
+                          f"in {app.name}{detail}; will retry next cycle.")
+            return False
 
     if not action.triggers_search or not app.force_search:
-        return
+        return True
 
     command_url = f"{app.url}/api/{app.api_version}/command"
     if app.type == "sonarr" and episode_ids:
@@ -473,6 +486,8 @@ def perform_action(app, download_id, movie_id, episode_ids, action):
         logging.debug(f"Explicit search is not supported for {app.type}; skipping search for download ID {download_id}.")
     else:
         logging.warning(f"No valid IDs found for download ID {download_id} in {app.name}, skipping search.")
+
+    return True
 
 def handle_stalled_downloads(cfg, app, qbit):
     """
