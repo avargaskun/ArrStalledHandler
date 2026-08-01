@@ -1190,3 +1190,204 @@ def test_flapping_download_is_never_actioned(load_main):
 
     assert calls("DELETE") == []
     assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {}
+
+
+# --- per-download grouping and DELETE failure handling ---
+
+COMMAND_URL = f"{RADARR}/api/v3/command"
+PACK_HASH = "PACKHASH"
+
+
+def errors(caplog):
+    return [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def search_bodies():
+    return [json.loads(c.request.body) for c in calls("POST")]
+
+
+def sonarr_pack(m, action=D.KEEP_AND_BLOCKLIST_SEARCH, first_detected=None):
+    """A Sonarr instance plus a two-record season pack, both rows tracked past timeout."""
+    cfg = make_config(watchers=(make_watcher(action=action),))
+    sonarr = make_app(type="sonarr", name="Sonarr1", url=RADARR, api_key="key")
+    first_detected = first_detected or ago(3700)
+    tracked_config(m, cfg, download_id="1", first_detected=first_detected, arr_service="Sonarr1")
+    m.add_stalled_download_to_db("2", first_detected, "Sonarr1", db_file=cfg.db_file)
+    responses.get(QUEUE_URL, json=queue_page([
+        queue_item(item_id=1, download_id=PACK_HASH, episodeId=11),
+        queue_item(item_id=2, download_id=PACK_HASH, episodeId=12),
+    ]))
+    return cfg, sonarr, first_detected
+
+
+@responses.activate
+def test_sibling_records_share_one_delete_and_search_each(load_main, caplog):
+    m = load_main()
+    cfg, sonarr, _ = sonarr_pack(m)
+    responses.delete(f"{QUEUE_URL}/1", json={})
+    responses.delete(f"{QUEUE_URL}/2", json={})
+    responses.post(COMMAND_URL, json={})
+
+    m.handle_stalled_downloads(cfg, sonarr, None)
+
+    assert len(calls("DELETE")) == 1
+    assert calls("DELETE")[0].request.url.startswith(f"{QUEUE_URL}/1?")
+    assert search_bodies() == [{"name": "EpisodeSearch", "episodeIds": [11]},
+                               {"name": "EpisodeSearch", "episodeIds": [12]}]
+    assert m.get_stalled_downloads_from_db("Sonarr1", db_file=cfg.db_file) == {}
+    assert errors(caplog) == []
+
+
+@responses.activate
+def test_sibling_within_timeout_is_not_actioned_with_the_group(load_main):
+    m = load_main()
+    cfg = make_config(watchers=(make_watcher(action=D.KEEP_AND_BLOCKLIST_SEARCH),))
+    sonarr = make_app(type="sonarr", name="Sonarr1", url=RADARR, api_key="key")
+    fresh = ago(10)
+    tracked_config(m, cfg, download_id="1", arr_service="Sonarr1")
+    m.add_stalled_download_to_db("2", fresh, "Sonarr1", db_file=cfg.db_file)
+    responses.get(QUEUE_URL, json=queue_page([
+        queue_item(item_id=1, download_id=PACK_HASH, episodeId=11),
+        queue_item(item_id=2, download_id=PACK_HASH, episodeId=12),
+    ]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+    responses.delete(f"{QUEUE_URL}/2", json={})
+    responses.post(COMMAND_URL, json={})
+
+    m.handle_stalled_downloads(cfg, sonarr, None)
+
+    assert len(calls("DELETE")) == 1
+    assert search_bodies() == [{"name": "EpisodeSearch", "episodeIds": [11]}]
+    assert m.get_stalled_downloads_from_db("Sonarr1", db_file=cfg.db_file) == {"2": fresh}
+
+
+@responses.activate
+def test_delete_404_drops_row_without_error(load_main, caplog):
+    m = load_main()
+    cfg = tracked_config(m, make_config(watchers=(make_watcher(action=D.REMOVE_AND_BLOCKLIST),)))
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+    responses.delete(f"{QUEUE_URL}/1", json={}, status=404)
+
+    with caplog.at_level(logging.INFO):
+        m.handle_stalled_downloads(cfg, APP, None)
+
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {}
+    assert [r.levelno for r in caplog.records if "already removed" in r.message] == [logging.INFO]
+    assert errors(caplog) == []
+
+
+@responses.activate
+def test_delete_500_retains_row_and_skips_search(load_main, caplog):
+    m = load_main()
+    first_detected = ago(3700)
+    cfg = tracked_config(m, make_config(watchers=(make_watcher(action=D.REMOVE_AND_BLOCKLIST_SEARCH),)),
+                         first_detected=first_detected)
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1, movieId=770)]))
+    responses.delete(f"{QUEUE_URL}/1", json={}, status=500)
+    responses.post(COMMAND_URL, json={})
+
+    m.handle_stalled_downloads(cfg, APP, None)
+
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {"1": first_detected}
+    assert calls("POST") == []
+    assert len(errors(caplog)) == 1
+
+
+@responses.activate
+def test_hashless_records_are_not_grouped_together(load_main):
+    m = load_main()
+    cfg = make_config(watchers=(make_watcher(action=D.REMOVE_AND_BLOCKLIST),))
+    tracked_config(m, cfg, download_id="1")
+    m.add_stalled_download_to_db("2", ago(3700), "Radarr0", db_file=cfg.db_file)
+    responses.get(QUEUE_URL, json=queue_page([
+        queue_item(item_id=1, download_id=None),
+        queue_item(item_id=2, download_id=None),
+    ]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+    responses.delete(f"{QUEUE_URL}/2", json={})
+
+    m.handle_stalled_downloads(cfg, APP, None)
+
+    assert len(calls("DELETE")) == 2
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {}
+
+
+@responses.activate
+def test_group_delete_failure_leaves_no_member_actioned(load_main):
+    m = load_main()
+    cfg, sonarr, first_detected = sonarr_pack(m)
+    responses.delete(f"{QUEUE_URL}/1", json={}, status=500)
+    responses.delete(f"{QUEUE_URL}/2", json={})
+    responses.post(COMMAND_URL, json={})
+
+    m.handle_stalled_downloads(cfg, sonarr, None)
+
+    assert len(calls("DELETE")) == 1
+    assert calls("POST") == []
+    assert m.get_stalled_downloads_from_db("Sonarr1", db_file=cfg.db_file) == {
+        "1": first_detected, "2": first_detected}
+
+
+@responses.activate
+def test_retained_group_retries_and_succeeds_next_cycle(load_main):
+    m = load_main()
+    cfg, sonarr, first_detected = sonarr_pack(m)
+    responses.delete(f"{QUEUE_URL}/1", json={}, status=500)   # cycle 1
+    responses.delete(f"{QUEUE_URL}/1", json={})               # cycle 2
+    responses.delete(f"{QUEUE_URL}/2", json={})
+    responses.post(COMMAND_URL, json={})
+
+    m.handle_stalled_downloads(cfg, sonarr, None)
+    after_failure = m.get_stalled_downloads_from_db("Sonarr1", db_file=cfg.db_file)
+
+    m.handle_stalled_downloads(cfg, sonarr, None)
+
+    assert after_failure == {"1": first_detected, "2": first_detected}
+    assert len(calls("DELETE")) == 2
+    assert search_bodies() == [{"name": "EpisodeSearch", "episodeIds": [11]},
+                               {"name": "EpisodeSearch", "episodeIds": [12]}]
+    assert m.get_stalled_downloads_from_db("Sonarr1", db_file=cfg.db_file) == {}
+
+
+@responses.activate
+def test_retained_row_is_reconciled_once_the_download_leaves_the_queue(load_main):
+    m = load_main()
+    cfg = make_config(watchers=(make_watcher(action=D.REMOVE_AND_BLOCKLIST),))
+    first_detected = ago(3700)
+    tracked_config(m, cfg, download_id="1", first_detected=first_detected)
+    responses.get(QUEUE_URL, json=queue_page([queue_item(item_id=1)]))
+    responses.get(QUEUE_URL, json=queue_page([]))
+    responses.delete(f"{QUEUE_URL}/1", json={}, status=500)
+
+    seen = m.handle_stalled_downloads(cfg, APP, None)
+    assert seen == {"1"}
+    assert m.reconcile_tracked_downloads("Radarr0", seen, db_file=cfg.db_file) == 0
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {"1": first_detected}
+
+    seen = m.handle_stalled_downloads(cfg, APP, None)
+
+    assert seen == set()
+    assert m.reconcile_tracked_downloads("Radarr0", seen, db_file=cfg.db_file) == 1
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {}
+    assert len(calls("DELETE")) == 1
+
+
+@responses.activate
+def test_metadata_flow_groups_sibling_records(load_main):
+    m = load_main()
+    cfg = make_config(count_metadata_as_stalled=True,
+                      watchers=(make_watcher(action=D.REMOVE_AND_BLOCKLIST),))
+    tracked_config(m, cfg, download_id="1")
+    m.add_stalled_download_to_db("2", ago(3700), "Radarr0", db_file=cfg.db_file)
+    responses.get(QUEUE_URL, json=queue_page([
+        queue_item(item_id=1, error=METADATA_ERROR, download_id=PACK_HASH),
+        queue_item(item_id=2, error=METADATA_ERROR, download_id=PACK_HASH),
+    ]))
+    responses.delete(f"{QUEUE_URL}/1", json={})
+    responses.delete(f"{QUEUE_URL}/2", json={})
+
+    m.detect_stuck_metadata_downloads(cfg, APP, None)
+
+    assert query()["status"] == ["queued"]
+    assert len(calls("DELETE")) == 1
+    assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {}

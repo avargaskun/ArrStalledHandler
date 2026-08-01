@@ -1,4 +1,5 @@
 import json
+import logging
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -49,18 +50,43 @@ def test_post_api_sends_json_and_swallows_errors(load_main):
 
 
 @responses.activate
-def test_delete_api_sends_params_and_swallows_errors(load_main):
+def test_delete_api_returns_status_and_sends_params(load_main):
     m = load_main({})
     responses.delete("http://arr/api/v3/queue/77", json={})
 
-    m.delete_api("http://arr/api/v3/queue/77", HEADERS, {"blocklist": "true", "skipRedownload": "false"})
+    status = m.delete_api("http://arr/api/v3/queue/77", HEADERS, {"blocklist": "true", "skipRedownload": "false"})
 
+    assert status == 200
     query = parse_qs(urlparse(responses.calls[0].request.url).query)
     assert query["blocklist"] == ["true"]
     assert query["skipRedownload"] == ["false"]
 
+
+@responses.activate
+def test_delete_api_returns_404_without_logging_error(load_main, caplog):
+    m = load_main({})
+    responses.delete("http://arr/api/v3/queue/77", status=404)
+
+    assert m.delete_api("http://arr/api/v3/queue/77", HEADERS) == 404
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+@responses.activate
+def test_delete_api_returns_500_without_logging_error(load_main, caplog):
+    m = load_main({})
     responses.delete("http://arr/api/v3/queue/77", status=500)
-    m.delete_api("http://arr/api/v3/queue/77", HEADERS, {"blocklist": "true"})
+
+    assert m.delete_api("http://arr/api/v3/queue/77", HEADERS) == 500
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+@responses.activate
+def test_delete_api_connection_error_returns_none_and_logs(load_main, caplog):
+    m = load_main({})
+    responses.delete("http://arr/api/v3/queue/77", body=requests.exceptions.ConnectionError("boom"))
+
+    assert m.delete_api("http://arr/api/v3/queue/77", HEADERS) is None
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
 @responses.activate

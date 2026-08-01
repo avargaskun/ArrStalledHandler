@@ -137,12 +137,14 @@ def post_api(url, headers, data=None):
         logging.error(f"API POST Error: {e}")
 
 def delete_api(url, headers, params=None):
+    """Return the HTTP status code, or None when no response was received."""
     try:
         response = requests.delete(url, headers=headers, params=params)
-        response.raise_for_status()
-        logging.debug(f"Successfully performed DELETE action on {url} with params {params}.")
     except requests.RequestException as e:
         logging.error(f"API DELETE Error: {e}")
+        return None
+    logging.debug(f"DELETE on {url} with params {params} returned {response.status_code}.")
+    return response.status_code
 
 class QbitClient:
     """qBittorrent Web API client owning its session, login and tag lookups."""
@@ -320,20 +322,19 @@ def match_watcher(item, watchers, qbit, qbit_clients):
     return SKIP_ITEM
 
 def _process_queue_item(cfg, app, qbit, item, tracked, qbit_clients, kind="stalled"):
-    """Apply the matching watcher's policy to one queue item."""
+    """Evaluate one queue item against the watchers; return (item, watcher) when it is
+    due for action, else None."""
     download_id = str(item["id"])
-    movie_id = item.get("movieId") if app.type == "radarr" else None
-    episode_ids = [item["episodeId"]] if app.type == "sonarr" and "episodeId" in item else None
 
     watcher = match_watcher(item, cfg.watchers, qbit, qbit_clients)
     if watcher is SKIP_ITEM:
-        return
+        return None
 
     if watcher.action is config.QueueItemDisposition.IGNORE:
         logging.debug(
             f"Ignoring download ID {download_id} in {app.name} (watcher '{watcher.name}')."
         )
-        return
+        return None
 
     if download_id in tracked:
         first_detected = tracked[download_id]
@@ -342,13 +343,14 @@ def _process_queue_item(cfg, app, qbit, item, tracked, qbit_clients, kind="stall
         logging.debug(f"Download ID {download_id} first detected: {first_detected}, elapsed: {elapsed_time} seconds.")
         if elapsed_time > watcher.stalled_timeout:
             logging.info(f"Handling {kind} download ID {download_id} in {app.name} (elapsed time: {elapsed_time} seconds).")
-            perform_action(app, download_id, movie_id, episode_ids, watcher.action)
-            remove_stalled_download_from_db(download_id, app.name, db_file=cfg.db_file)
+            return item, watcher
         else:
             logging.info(f"{kind.capitalize()} download ID {download_id} in {app.name} is within timeout period ({elapsed_time} seconds).")
     else:
         add_stalled_download_to_db(download_id, datetime.now(timezone.utc), app.name, db_file=cfg.db_file)
         logging.info(f"Adding {kind} download ID {download_id} in {app.name} to the database.")
+
+    return None
 
 def detect_stuck_metadata_downloads(cfg, app, qbit):
     """Detect downloads stuck at 'Downloading Metadata' and apply the watcher timeout logic.
@@ -386,11 +388,15 @@ def detect_stuck_metadata_downloads(cfg, app, qbit):
     qbit_clients = resolve_qbittorrent_clients(app, qbit, cfg.watchers)
 
     seen = set()
+    ready = []
     for item in metadata_records:
         if (item.get("errorMessage") or "").lower() == "qbittorrent is downloading metadata":
             seen.add(str(item["id"]))
-            _process_queue_item(cfg, app, qbit, item, tracked, qbit_clients,
-                                kind="stuck metadata")
+            due = _process_queue_item(cfg, app, qbit, item, tracked, qbit_clients,
+                                      kind="stuck metadata")
+            if due is not None:
+                ready.append(due)
+    _action_ready_downloads(cfg, app, ready)
     return seen
 
 def query_api_paginated(base_url, headers, params=None, page_size=50):
@@ -445,18 +451,31 @@ def query_api_paginated(base_url, headers, params=None, page_size=50):
 
     return all_records
 
-def perform_action(app, download_id, movie_id, episode_ids, action):
-    """Apply a QueueItemDisposition to a queue item, optionally triggering a re-search."""
+def perform_action(app, download_id, movie_id, episode_ids, action, skip_delete=False):
+    """Apply a QueueItemDisposition to a queue item, optionally triggering a re-search.
+
+    Returns True when the disposition is applied (or moot), False when it must be retried.
+    """
     if action is config.QueueItemDisposition.IGNORE:
         raise ValueError("IGNORE items are skipped before reaching perform_action")
 
     headers = {"X-Api-Key": app.api_key}
-    action_url = f"{app.url}/api/{app.api_version}/queue/{download_id}"
-    logging.info(f"Performing action: {action.name} (ID: {download_id}) in {app.name}...")
-    delete_api(action_url, headers, action.as_params())
+    if skip_delete:
+        logging.debug(f"Queue record {download_id} shares an already-actioned download; skipping DELETE.")
+    else:
+        action_url = f"{app.url}/api/{app.api_version}/queue/{download_id}"
+        logging.info(f"Performing action: {action.name} (ID: {download_id}) in {app.name}...")
+        status = delete_api(action_url, headers, action.as_params())
+        if status == 404:
+            logging.info(f"Queue item {download_id} in {app.name} was already removed; nothing to delete.")
+        elif status is None or status >= 400:
+            detail = f" (HTTP {status})" if status is not None else ""
+            logging.error(f"Failed to apply {action.name} to queue item {download_id} "
+                          f"in {app.name}{detail}; will retry next cycle.")
+            return False
 
     if not action.triggers_search or not app.force_search:
-        return
+        return True
 
     command_url = f"{app.url}/api/{app.api_version}/command"
     if app.type == "sonarr" and episode_ids:
@@ -471,6 +490,29 @@ def perform_action(app, download_id, movie_id, episode_ids, action):
         logging.debug(f"Explicit search is not supported for {app.type}; skipping search for download ID {download_id}.")
     else:
         logging.warning(f"No valid IDs found for download ID {download_id} in {app.name}, skipping search.")
+
+    return True
+
+def _action_ready_downloads(cfg, app, ready):
+    """Action due queue records grouped by download: one DELETE per download, per-record
+    searches and row removal only after the download's disposition succeeded."""
+    groups = {}
+    for item, watcher in ready:
+        key = item.get("downloadId") or ("record", str(item["id"]))
+        groups.setdefault(key, []).append((item, watcher))
+
+    for members in groups.values():
+        for index, (item, watcher) in enumerate(members):
+            download_id = str(item["id"])
+            movie_id = item.get("movieId") if app.type == "radarr" else None
+            episode_ids = [item["episodeId"]] if app.type == "sonarr" and "episodeId" in item else None
+            if index == 0:
+                if not perform_action(app, download_id, movie_id, episode_ids, watcher.action):
+                    break  # retain every member's row; the whole group retries next cycle
+            else:
+                perform_action(app, download_id, movie_id, episode_ids, watcher.action,
+                               skip_delete=True)
+            remove_stalled_download_from_db(download_id, app.name, db_file=cfg.db_file)
 
 def handle_stalled_downloads(cfg, app, qbit):
     """
@@ -504,10 +546,14 @@ def handle_stalled_downloads(cfg, app, qbit):
     tracked = get_stalled_downloads_from_db(app.name, db_file=cfg.db_file)
     qbit_clients = resolve_qbittorrent_clients(app, qbit, cfg.watchers)
     seen = set()
+    ready = []
     for item in queue_records:
         if (item.get("errorMessage") or "").lower() == "the download is stalled with no connections":
             seen.add(str(item["id"]))
-            _process_queue_item(cfg, app, qbit, item, tracked, qbit_clients)
+            due = _process_queue_item(cfg, app, qbit, item, tracked, qbit_clients)
+            if due is not None:
+                ready.append(due)
+    _action_ready_downloads(cfg, app, ready)
     return seen
 
 # --- Health Check Server Logic ---
