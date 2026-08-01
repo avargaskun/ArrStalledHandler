@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1](https://github.com/avargaskun/ArrStalledHandler/compare/v1.5.0...v1.5.1) (2026-08-01)
+
+
+### Bug Fixes
+
+* action multi-record downloads once and retry failed queue deletes ([#24](https://github.com/avargaskun/ArrStalledHandler/issues/24)) ([9c33286](https://github.com/avargaskun/ArrStalledHandler/commit/9c3328641a29dc00102f6eea17e5f69dc5014a46))
+
 ## [1.5.0](https://github.com/avargaskun/ArrStalledHandler/compare/v1.4.3...v1.5.0) (2026-07-30)
 
 
