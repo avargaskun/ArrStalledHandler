@@ -1272,7 +1272,7 @@ def test_delete_404_drops_row_without_error(load_main, caplog):
         m.handle_stalled_downloads(cfg, APP, None)
 
     assert m.get_stalled_downloads_from_db("Radarr0", db_file=cfg.db_file) == {}
-    assert "already removed" in caplog.text
+    assert [r.levelno for r in caplog.records if "already removed" in r.message] == [logging.INFO]
     assert errors(caplog) == []
 
 

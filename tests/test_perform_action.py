@@ -144,7 +144,7 @@ def test_delete_404_is_benign_and_still_searches(load_main, caplog):
         assert m.perform_action(make_app(), "77", 770, None, D.REMOVE_AND_BLOCKLIST_SEARCH) is True
 
     assert errors(caplog) == []
-    assert any("already removed" in r.message for r in caplog.records)
+    assert [r.levelno for r in caplog.records if "already removed" in r.message] == [logging.INFO]
     assert json.loads(posts()[0].request.body) == {"name": "MoviesSearch", "movieIds": [770]}
 
 
